@@ -6,7 +6,7 @@
 
 pub mod python;
 
-use concord_core::{Symbol, SymbolId, SymbolKind, UseSite};
+use concord_core::{CallArgs, Symbol, SymbolId, SymbolKind, UseSite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -34,6 +34,9 @@ pub struct RawRef {
     pub line: u32,
     pub text: String,
     pub is_call: bool,
+    /// Argument shape for calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<CallArgs>,
 }
 
 /// Everything Concord knows about one source file.
@@ -212,6 +215,7 @@ impl RepoIndex {
                     line: r.line,
                     from: r.from.clone(),
                     text: r.text.clone(),
+                    call: r.args.clone(),
                 };
                 let v = out.entry(target).or_default();
                 if !v.contains(&site) {

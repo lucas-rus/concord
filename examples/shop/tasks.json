@@ -1,0 +1,14 @@
+[
+  {
+    "name": "currency",
+    "prompt": "Add multi-currency support to the shop. Catalog prices are in EUR. Create `shop/currency.py` with fixed exchange rates from EUR (USD: 1.08, RON: 4.97, EUR: 1) and a function `convert(amount, currency)` that converts a EUR amount into the given currency, rounded to cents (raise ValueError for unknown currencies). Then change `price_order` in `shop/pricing.py` so that it takes a new required keyword-only argument `currency` and returns the total in that currency. Update every existing caller in the shop package so it passes `currency=\"EUR\"` and keeps its behaviour, and update and extend the tests. Run `python3 -m unittest discover -s tests -t .` before you finish."
+  },
+  {
+    "name": "invoices",
+    "prompt": "Add invoices to the shop. Create `shop/invoices.py` with a function `render_invoice(order)` that returns a plain-text invoice: a first line `Invoice for <customer>`, then one line per order line with the product name, the quantity and the line total, and a last line `Total: <amount> EUR` where the amount is the order total as computed by the existing pricing function. Reuse the helpers in `shop/pricing.py`. Add tests in `tests/test_invoices.py`. Run `python3 -m unittest discover -s tests -t .` before you finish."
+  },
+  {
+    "name": "discount",
+    "prompt": "Fix a rounding bug in `apply_discount` in `shop/pricing.py`: the discounted amount must be rounded to 2 decimal places using ROUND_HALF_UP (for example 10% off 0.15 is 0.14, and 33% off 10.00 is 6.70). Do not change the function's signature. Put your regression tests in a new file `tests/test_discount.py`. Run `python3 -m unittest discover -s tests -t .` before you finish."
+  }
+]

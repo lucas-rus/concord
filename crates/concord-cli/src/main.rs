@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use concord_cli::live::{self, Mode};
+use concord_cli::run::{self, RunConfig, Task};
 use concord_cli::{analyze_branches, report, simulate};
 use concord_core::diff_symbols;
 use concord_git::Repo;
 use concord_lang::python;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Concord: contract-level coherence for parallel AI coding agents.
 #[derive(Parser)]
@@ -50,6 +53,53 @@ enum Command {
         notices: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Launch several Claude Code agents in parallel worktrees, coordinate them
+    /// live, integrate their work and run the tests.
+    Run {
+        /// JSON file with `[{"name": "...", "prompt": "..."}, ...]`.
+        #[arg(long)]
+        tasks: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+        #[arg(long, default_value = "claude-haiku-5-5")]
+        model: String,
+        /// off (no hooks) | observe (log only) | enforce (notices + finish gate).
+        #[arg(long, default_value = "enforce")]
+        mode: Mode,
+        /// Spending cap per agent session, in USD.
+        #[arg(long, default_value_t = 1.0)]
+        budget_usd: f64,
+        /// Test command run in each worktree and on the integrated result.
+        #[arg(long, default_value = "python3 -m unittest discover -s tests -t .")]
+        test_cmd: String,
+        /// Tools the agents may use without asking (besides file edits).
+        #[arg(long, default_values_t = ["Bash(python3 -m unittest *)".to_string(), "Bash(python3 -m pytest *)".to_string()])]
+        allow: Vec<String>,
+        /// Where runs are stored (default: <repo>/.concord/runs).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// How long a finishing agent may wait for producers it depends on.
+        #[arg(long, default_value_t = 900)]
+        max_wait_secs: u64,
+        /// Rounds of resuming agents that became stale after finishing.
+        #[arg(long, default_value_t = 2)]
+        resume_rounds: u32,
+        /// Claude Code executable.
+        #[arg(long, default_value = "claude")]
+        claude: String,
+    },
+    /// Hook entry point (configured by `concord run`): forwards the hook input
+    /// on stdin to the daemon and prints its answer.
+    Hook {
+        #[arg(long)]
+        addr: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        event: String,
     },
 }
 
@@ -113,6 +163,44 @@ fn main() -> Result<()> {
             } else {
                 print!("{}", report::analysis(&analysis, sim.as_ref()));
             }
+        }
+        Command::Run {
+            tasks,
+            repo,
+            base,
+            model,
+            mode,
+            budget_usd,
+            test_cmd,
+            allow,
+            out,
+            max_wait_secs,
+            resume_rounds,
+            claude,
+        } => {
+            let tasks: Vec<Task> = serde_json::from_str(&std::fs::read_to_string(&tasks)?)?;
+            let repo_root = Repo::open(&repo)?.root().to_path_buf();
+            let cfg = RunConfig {
+                out_dir: out.unwrap_or_else(|| repo_root.join(".concord").join("runs")),
+                repo: repo_root,
+                base,
+                tasks,
+                model,
+                mode,
+                budget_usd,
+                test_cmd,
+                allowed_tools: allow,
+                max_wait: Duration::from_secs(max_wait_secs),
+                resume_rounds,
+                claude,
+                concord_exe: std::env::current_exe()?,
+            };
+            let r = run::run(&cfg)?;
+            print!("{}", run::render(&r));
+            eprintln!("run directory: {}", r.run_dir.display());
+        }
+        Command::Hook { addr, agent, event } => {
+            std::process::exit(live::hook_client(&addr, &agent, &event));
         }
     }
     Ok(())

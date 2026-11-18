@@ -18,7 +18,14 @@ Aligned with the thesis work plan (defence: summer 2027).
 - [ ] Validate the 15 silent breaking couplings by running both features' tests on the clean merge (CooperBench Docker images)
 - [ ] Resolver quality: precision/recall of `RepoIndex` uses against scip-python / basedpyright on the 9 Python repos
 
-## M2: Live daemon and Claude Code integration (Jan 2027)
+## M2: Live daemon and Claude Code integration ✅ (pulled forward, Nov 2026)
+
+- [x] `concord run`: parallel Claude Code agents (headless, Haiku) in worktrees; hooks; integration + tests ([eval/live](../eval/live/README.md))
+- [x] Daemon: PostToolUse → reads/footprints/notices via `additionalContext`; Stop → finish gate with producer merge and call-site conformance
+- [x] Resume of agents that became stale after finishing
+- [x] Shop scenario: integrated tests pass 3/3 with Concord vs. 0/3 without
+
+## M2 (original plan, remaining items)
 
 - [ ] `concord-daemon` (tokio): per-agent worktree registry, hook endpoint (HTTP + `concord hook` command shim), SQLite event log
 - [ ] PostToolUse/PostToolBatch: `Read`/`Grep` → `observe_reads`; `Edit`/`Write`/`Bash` → snapshot + diff → `observe_footprint`

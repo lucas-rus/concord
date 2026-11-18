@@ -17,6 +17,8 @@ pub mod symbol;
 
 pub use change::{ChangeKind, SymbolChange, diff_symbols};
 pub use coherence::{AgentId, Blocker, CoherenceState, Directory, Gate, Notice, NoticeKind};
-pub use compat::{Compat, classify};
+pub use compat::{Compat, check_call, classify};
 pub use conflict::{BranchFootprint, Finding, Summary, analyze, summarize};
-pub use symbol::{Contract, Digest, Param, ParamKind, Signature, Span, Symbol, SymbolId, SymbolKind, UseSite};
+pub use symbol::{
+    CallArgs, Contract, Digest, Param, ParamKind, Signature, Span, Symbol, SymbolId, SymbolKind, UseSite,
+};

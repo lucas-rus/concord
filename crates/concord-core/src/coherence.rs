@@ -310,6 +310,38 @@ impl Directory {
         }
     }
 
+    /// Latest published contract of a symbol (`Some(None)` = published as removed).
+    pub fn published_contract(&self, symbol: &SymbolId) -> Option<Option<&Contract>> {
+        self.symbols
+            .get(symbol)
+            .and_then(|e| e.published.as_ref())
+            .map(|p| p.contract.as_ref())
+    }
+
+    /// The agent that published the latest contract of a symbol.
+    pub fn published_by(&self, symbol: &SymbolId) -> Option<&AgentId> {
+        self.symbols
+            .get(symbol)
+            .and_then(|e| e.published.as_ref())
+            .and_then(|p| p.by.as_ref())
+    }
+
+    /// Symbols for which the agent has an unacknowledged newer contract.
+    pub fn stale_symbols(&self, agent: &AgentId) -> Vec<SymbolId> {
+        self.agents
+            .get(agent)
+            .map(|a| a.stale.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The agent's own use sites of a symbol.
+    pub fn uses_of(&self, agent: &AgentId, symbol: &SymbolId) -> Vec<UseSite> {
+        self.agents
+            .get(agent)
+            .and_then(|a| a.uses.get(symbol).cloned())
+            .unwrap_or_default()
+    }
+
     /// The agent observed the definitions of these symbols (read, search, navigation).
     pub fn observe_reads(&mut self, agent: &AgentId, symbols: impl IntoIterator<Item = SymbolId>) -> Vec<Notice> {
         self.agents.entry(agent.clone()).or_default();
@@ -382,6 +414,15 @@ impl Directory {
                             sites: vec![],
                         });
                     }
+                }
+                _ if entry.published.as_ref().is_some_and(|p| {
+                    p.by.as_ref() == Some(agent)
+                        && p.contract.as_ref().map(|x| &x.digest) == c.after.as_ref().map(|x| &x.digest)
+                }) =>
+                {
+                    // Already published exactly this contract: nothing new to announce.
+                    entry.owner = Some(agent.clone());
+                    entry.pending = None;
                 }
                 _ => {
                     let first = entry.owner.is_none();
@@ -632,6 +673,7 @@ mod tests {
                 line,
                 from: SymbolId::new(from),
                 text: text.into(),
+                call: None,
             }],
         )])
     }

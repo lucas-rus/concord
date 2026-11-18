@@ -11,7 +11,7 @@
 //! return types) counts as breaking. The speculative type-check catches what
 //! the rules approve wrongly in the other direction.
 
-use crate::symbol::{Param, ParamKind, Signature};
+use crate::symbol::{CallArgs, Param, ParamKind, Signature};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +137,54 @@ pub fn classify(old: &Signature, new: &Signature) -> Compat {
     }
 }
 
+/// Problems a call site would have against `sig` (empty = it conforms).
+/// `bound`: the first parameter (`self`/`cls`) is supplied implicitly.
+pub fn check_call(sig: &Signature, call: &CallArgs, bound: bool) -> Vec<String> {
+    let params: Vec<&Param> = sig.params.iter().skip(usize::from(bound)).collect();
+    let positional: Vec<&Param> = params.iter().copied().filter(|p| is_positional(p.kind)).collect();
+    let has_var_pos = params.iter().any(|p| p.kind == ParamKind::VarPositional);
+    let has_var_kw = params.iter().any(|p| p.kind == ParamKind::VarKeyword);
+    let mut problems = Vec::new();
+    let mut filled: Vec<&str> = Vec::new();
+
+    let n = call.positional as usize;
+    if n > positional.len() && !has_var_pos {
+        problems.push(format!(
+            "takes {} positional argument(s) but {n} were given",
+            positional.len()
+        ));
+    }
+    filled.extend(positional.iter().take(n).map(|p| p.name.as_str()));
+
+    for k in &call.keywords {
+        match params.iter().find(|p| &p.name == k) {
+            Some(p) if p.kind == ParamKind::PositionalOnly => problems.push(format!("`{k}` is positional-only")),
+            Some(p) if matches!(p.kind, ParamKind::PositionalOrKeyword | ParamKind::KeywordOnly) => {
+                if filled.contains(&p.name.as_str()) {
+                    problems.push(format!("multiple values for argument `{k}`"));
+                }
+                filled.push(&p.name);
+            }
+            _ if has_var_kw => {}
+            _ => problems.push(format!("unexpected keyword argument `{k}`")),
+        }
+    }
+
+    if !(call.star || call.double_star) {
+        for p in &params {
+            let required = !p.has_default()
+                && matches!(
+                    p.kind,
+                    ParamKind::PositionalOnly | ParamKind::PositionalOrKeyword | ParamKind::KeywordOnly
+                );
+            if required && !filled.contains(&p.name.as_str()) {
+                problems.push(format!("missing required argument `{}`", p.name));
+            }
+        }
+    }
+    problems
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +221,42 @@ mod tests {
         let c = classify(&old, &new);
         assert!(c.breaking);
         assert!(c.reasons[0].contains("user_id"));
+    }
+
+    fn call(positional: u32, keywords: &[&str]) -> CallArgs {
+        CallArgs {
+            positional,
+            keywords: keywords.iter().map(|s| s.to_string()).collect(),
+            star: false,
+            double_star: false,
+        }
+    }
+
+    #[test]
+    fn call_conformance() {
+        // def send_email(to, body, *, user_id)
+        let s = sig(vec![
+            p("to", PositionalOrKeyword, None),
+            p("body", PositionalOrKeyword, None),
+            p("user_id", KeywordOnly, None),
+        ]);
+        assert_eq!(
+            check_call(&s, &call(2, &[]), false),
+            vec!["missing required argument `user_id`".to_string()]
+        );
+        assert!(check_call(&s, &call(2, &["user_id"]), false).is_empty());
+        assert!(!check_call(&s, &call(3, &["user_id"]), false).is_empty());
+        assert!(!check_call(&s, &call(2, &["user_id", "cc"]), false).is_empty());
+        // Bound method: self is implicit.
+        let m = sig(vec![
+            p("self", PositionalOrKeyword, None),
+            p("x", PositionalOrKeyword, None),
+        ]);
+        assert!(check_call(&m, &call(1, &[]), true).is_empty());
+        // Splats make missing arguments unknowable.
+        let mut c = call(0, &[]);
+        c.double_star = true;
+        assert!(check_call(&s, &c, false).is_empty());
     }
 
     #[test]

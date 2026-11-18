@@ -12,7 +12,7 @@
 //! verbatim), so formatting and comments never produce a change.
 
 use crate::{FileIndex, ImportBinding, LangError, RawRef};
-use concord_core::{Contract, Digest, Param, ParamKind, Signature, Span, Symbol, SymbolId, SymbolKind};
+use concord_core::{CallArgs, Contract, Digest, Param, ParamKind, Signature, Span, Symbol, SymbolId, SymbolKind};
 use std::collections::BTreeMap;
 use tree_sitter::{Node, Parser};
 
@@ -569,11 +569,36 @@ impl<'a> Extractor<'a> {
                         line,
                         text: text.clone(),
                         is_call: false,
+                        args: None,
                     });
                 }
             }
             _ => {}
         }
+    }
+
+    /// Argument shape of a call's `arguments` node.
+    fn call_args(&self, args: Node) -> CallArgs {
+        let mut out = CallArgs::default();
+        if args.kind() != "argument_list" {
+            out.positional = 1; // e.g. a generator expression argument
+            return out;
+        }
+        let mut c = args.walk();
+        for a in args.named_children(&mut c) {
+            match a.kind() {
+                "keyword_argument" => {
+                    if let Some(n) = a.child_by_field_name("name") {
+                        out.keywords.push(self.text(n).to_owned());
+                    }
+                }
+                "list_splat" => out.star = true,
+                "dictionary_splat" => out.double_star = true,
+                "comment" => {}
+                _ => out.positional += 1,
+            }
+        }
+        out
     }
 
     /// Structured parameters of a `parameters` node.
@@ -710,7 +735,18 @@ impl<'a> Extractor<'a> {
     /// Collect raw references (calls, names, attribute chains) inside `n`.
     fn collect_refs(&mut self, n: Node, from: &SymbolId) {
         match n.kind() {
-            "comment" | "string" | "concatenated_string" | "import_statement" | "import_from_statement" => {}
+            "comment" | "import_statement" | "import_from_statement" => {}
+            // Only the `{...}` interpolations of (f-)strings contain code.
+            "string" | "concatenated_string" => {
+                let mut c = n.walk();
+                let children: Vec<Node> = n.named_children(&mut c).collect();
+                for ch in children {
+                    match ch.kind() {
+                        "interpolation" | "string" => self.collect_refs(ch, from),
+                        _ => {}
+                    }
+                }
+            }
             "call" => {
                 let func = n.child_by_field_name("function");
                 let chain = func.and_then(|f| self.chain_of(f));
@@ -722,6 +758,7 @@ impl<'a> Extractor<'a> {
                             line: n.start_position().row as u32 + 1,
                             text: truncate(&collapse_ws(self.text(n)), 100),
                             is_call: true,
+                            args: n.child_by_field_name("arguments").map(|a| self.call_args(a)),
                         });
                         if let Some(args) = n.child_by_field_name("arguments") {
                             self.collect_refs(args, from);
@@ -737,6 +774,7 @@ impl<'a> Extractor<'a> {
                     line: n.start_position().row as u32 + 1,
                     text: truncate(&collapse_ws(self.text(n)), 100),
                     is_call: false,
+                    args: None,
                 }),
                 None => self.recurse(n, from),
             },
@@ -1010,6 +1048,18 @@ class Cart(Base):
         let b = diff_symbols(&base.symbols, &breaking.symbols);
         assert!(b.iter().any(|c| c.symbol.as_str() == "m.send" && c.is_breaking()));
         assert!(b.iter().any(|c| c.symbol.as_str() == "m.E" && c.is_breaking()));
+    }
+
+    #[test]
+    fn finds_calls_inside_f_strings() {
+        let f = index_file("m.py", "def r(o):\n    return f\"Total: {price_order(o)} EUR\"\n").unwrap();
+        let call = f
+            .refs
+            .iter()
+            .find(|r| r.chain == ["price_order"])
+            .expect("call inside f-string");
+        assert!(call.is_call);
+        assert_eq!(call.args.as_ref().unwrap().positional, 1);
     }
 
     #[test]

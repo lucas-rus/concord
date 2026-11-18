@@ -179,4 +179,18 @@ pub struct UseSite {
     pub from: SymbolId,
     /// Source text of the use, e.g. `send_email(user.email, reset_msg(token))`.
     pub text: String,
+    /// Argument shape, if the use is a call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<CallArgs>,
+}
+
+/// Shape of the arguments at a call site, enough to check it against a signature.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallArgs {
+    pub positional: u32,
+    pub keywords: Vec<String>,
+    /// A `*iterable` splat is present (positional count is a lower bound).
+    pub star: bool,
+    /// A `**mapping` splat is present (keywords are not all known).
+    pub double_star: bool,
 }

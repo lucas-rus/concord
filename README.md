@@ -7,7 +7,7 @@
 
 Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenHands, ...) **at the same time on the same repository** without them silently breaking each other's work. It is the subject of a Bachelor thesis at the Faculty of Computer Science, West University of Timișoara (supervisor: Dr. Adrian Spătaru).
 
-> **Status:** early development (milestone M0). The symbol/contract engine, the coherence protocol and the offline branch analyzer work and are tested. The live daemon, agent hooks and the CooperBench evaluation are next. See the [roadmap](docs/roadmap.md).
+> **Status:** early research prototype. Working: the symbol/contract engine, the coherence protocol, the offline analyzer, and live coordination of real Claude Code agents (`concord run`). Next: precise type-checker-backed resolution, speculative integration and the CooperBench evaluation. See the [roadmap](docs/roadmap.md).
 
 ## The problem
 
@@ -89,6 +89,18 @@ concord symbols path/to/file.py          # symbols, contracts and digests
 concord diff old.py new.py               # contract vs. body changes between two versions
 concord analyze --base main b1 b2 --json # machine-readable output (for experiments)
 ```
+
+## First live results: real agents
+
+`concord run` launches several Claude Code agents (Haiku) in parallel worktrees and coordinates them live through hooks. On the [shop scenario](eval/live/README.md), three agents work on three ordinary tickets:
+- one makes `currency` a required argument of `price_order`;
+- one writes new code that calls `price_order`;
+- one fixes a bug in the same file.
+
+| | integrated tests pass |
+|---|---|
+| without Concord | **0 / 3** (each agent's tests pass alone; git merges cleanly; merged code crashes) |
+| with Concord | **3 / 3** (≈ $0.03 per run) |
 
 ## First results (RQ1, CooperBench gold patches)
 

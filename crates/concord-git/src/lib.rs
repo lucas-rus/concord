@@ -210,6 +210,67 @@ impl Repo {
     }
 }
 
+/// Outcome of merging a revision into a worktree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeIntoOutcome {
+    pub clean: bool,
+    pub conflicted_files: Vec<String>,
+}
+
+const IDENTITY: [&str; 4] = ["-c", "user.name=concord", "-c", "user.email=concord@localhost"];
+
+impl Repo {
+    /// `git worktree add -b <branch> <path> <start>`.
+    pub fn worktree_add(&self, path: &Path, branch: &str, start: &str) -> Result<()> {
+        let p = path.to_string_lossy();
+        self.git(&["worktree", "add", "-q", "-b", branch, &p, start])?;
+        Ok(())
+    }
+
+    /// Commit everything in a worktree (including untracked files); returns HEAD.
+    pub fn commit_all(worktree: &Path, message: &str) -> Result<String> {
+        run(worktree, &["add", "-A", "."], None)?;
+        let mut args: Vec<&str> = IDENTITY.to_vec();
+        args.extend(["commit", "-q", "--allow-empty", "--no-verify", "-m", message]);
+        run(worktree, &args, None)?;
+        Ok(run(worktree, &["rev-parse", "HEAD"], None)?.trim().to_owned())
+    }
+
+    /// Merge `rev` into the worktree's current branch. On conflict the merge is
+    /// aborted and the conflicted files are reported.
+    pub fn merge_into(worktree: &Path, rev: &str, message: &str) -> Result<MergeIntoOutcome> {
+        let mut args: Vec<&str> = IDENTITY.to_vec();
+        args.extend(["merge", "--no-ff", "--no-edit", "-m", message, rev]);
+        match run(worktree, &args, None) {
+            Ok(_) => Ok(MergeIntoOutcome {
+                clean: true,
+                conflicted_files: vec![],
+            }),
+            Err(GitError::Command { .. }) => {
+                let files = run(worktree, &["diff", "--name-only", "--diff-filter=U"], None).unwrap_or_default();
+                let _ = run(worktree, &["merge", "--abort"], None);
+                Ok(MergeIntoOutcome {
+                    clean: false,
+                    conflicted_files: files.lines().map(str::to_owned).collect(),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A commit whose tree is the clean merge of `a` and `b` (parents a, b),
+    /// without touching any worktree. `None` if the merge conflicts.
+    pub fn virtual_merge(&self, a: &str, b: &str) -> Result<Option<String>> {
+        let m = self.merge_tree(a, b)?;
+        if !m.clean {
+            return Ok(None);
+        }
+        let mut args: Vec<&str> = IDENTITY.to_vec();
+        args.extend(["commit-tree", &m.tree, "-p", a, "-p", b, "-m", "concord virtual base"]);
+        Ok(Some(self.git(&args)?.trim().to_owned()))
+    }
+}
+
 fn run(dir: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir).args(args);

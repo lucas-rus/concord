@@ -226,6 +226,7 @@ mod tests {
                     line: 4,
                     from: SymbolId::new("auth.reset.request_reset"),
                     text: "send_email(user.email, reset_msg(token))".into(),
+                    call: None,
                 }],
             )]),
         };

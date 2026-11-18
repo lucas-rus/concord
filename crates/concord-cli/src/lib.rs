@@ -1,6 +1,8 @@
 //! Library part of the `concord` CLI: branch analysis and protocol simulation.
 
+pub mod live;
 pub mod report;
+pub mod run;
 
 use anyhow::{Context, Result};
 use concord_core::{
@@ -63,6 +65,18 @@ pub fn branch_footprint(
     base_index: &RepoIndex,
     warnings: &mut Vec<String>,
 ) -> Result<BranchFootprint> {
+    Ok(footprint_and_index(repo, base, branch, base_files, base_index, warnings)?.0)
+}
+
+/// Like [`branch_footprint`], also returning the symbol index of the branch.
+pub fn footprint_and_index(
+    repo: &Repo,
+    base: &str,
+    branch: &str,
+    base_files: &BTreeMap<String, FileIndex>,
+    base_index: &RepoIndex,
+    warnings: &mut Vec<String>,
+) -> Result<(BranchFootprint, RepoIndex)> {
     let changed = repo.changed_files(base, branch)?;
     let changed_files: BTreeSet<String> = changed.iter().map(|c| c.path.clone()).collect();
     let py: Vec<&concord_git::ChangedFile> = changed.iter().filter(|c| python::is_python_path(&c.path)).collect();
@@ -114,12 +128,15 @@ pub fn branch_footprint(
     let module_level: BTreeSet<String> = new_files.keys().cloned().collect();
     let uses = index.uses_from(&from, &module_level);
 
-    Ok(BranchFootprint {
-        name: branch.to_owned(),
-        changed_files,
-        changes,
-        uses,
-    })
+    Ok((
+        BranchFootprint {
+            name: branch.to_owned(),
+            changed_files,
+            changes,
+            uses,
+        },
+        index,
+    ))
 }
 
 /// Analyse several branches developed concurrently from `base`.
