@@ -212,8 +212,13 @@ def main() -> int:
                 task_id = task.name.removeprefix("task")
                 url, base = parse_setup(task / "setup.sh")
                 print(f"{repo_name}/{task.name}: {url} @ {base[:10]}", file=sys.stderr)
-                repo = prepare_repo(args.cache, url, base)
-                branches = make_branches(repo, base, feature_dirs(task))
+                try:
+                    repo = prepare_repo(args.cache, url, base)
+                    branches = make_branches(repo, base, feature_dirs(task))
+                except subprocess.CalledProcessError as e:
+                    # One broken task (network, huge checkout) must not stop the run.
+                    print(f"  skipped: {' '.join(e.cmd)} -> {(e.stderr or '').strip()[:300]}", file=sys.stderr)
+                    continue
                 names = {b: n for n, b in branches.items() if b}
                 if len(names) < 2:
                     continue
@@ -231,6 +236,7 @@ def main() -> int:
                 rows = pair_rows(repo_name, task_id, analysis, names)
                 for row in rows:
                     out.write(json.dumps(row) + "\n")
+                out.flush()
                 all_rows.extend(rows)
 
     print(json.dumps(summarize(all_rows, gold), indent=2))

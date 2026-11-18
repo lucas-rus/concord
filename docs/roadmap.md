@@ -14,7 +14,8 @@ Aligned with the thesis work plan (defence: summer 2027).
 
 - [x] Breaking vs. compatible contract changes (structured signatures, `compat::classify`)
 - [x] `eval/rq1/run_rq1.py`: turn every CooperBench feature pair (`feature<N>/feature.patch`) into branches on the task's base commit and run `concord analyze --json` (textual results match CooperBench's gold conflict report)
-- [ ] Report: how often file overlap hides disjoint symbols; how often pairs are coupled through cross-file contracts; same-symbol edits
+- [x] Report on all 560 Python gold pairs ([eval/rq1/results.md](../eval/rq1/results.md)): 24% symbol-disjoint file overlaps, 47% contract-coupled but only 13% breaking, 15 silent breaking couplings
+- [ ] Validate the 15 silent breaking couplings by running both features' tests on the clean merge (CooperBench Docker images)
 - [ ] Resolver quality: precision/recall of `RepoIndex` uses against scip-python / basedpyright on the 9 Python repos
 
 ## M2: Live daemon and Claude Code integration (Jan 2027)

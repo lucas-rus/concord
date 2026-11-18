@@ -90,6 +90,16 @@ concord diff old.py new.py               # contract vs. body changes between two
 concord analyze --base main b1 b2 --json # machine-readable output (for experiments)
 ```
 
+## First results (RQ1, CooperBench gold patches)
+
+On all **560** Python feature pairs of [CooperBench](https://github.com/cooperbench/CooperBench), Concord's textual merge results agree with CooperBench's own gold conflict report on 560/560 pairs. At symbol level:
+
+- **24%** of pairs share files but touch disjoint symbols, so a file lock would serialise them needlessly.
+- **47%** are contract-coupled, but only **13%** through a *breaking* change. Compatibility analysis cuts gating by 72%.
+- **15** pairs have a breaking coupling that git merges cleanly.
+
+Details: [eval/rq1/results.md](eval/rq1/results.md).
+
 ## Architecture
 
 ```mermaid
