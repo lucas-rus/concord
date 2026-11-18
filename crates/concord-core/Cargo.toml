@@ -1,0 +1,16 @@
+[package]
+name = "concord-core"
+description = "Domain model and contract-coherence protocol for coordinating parallel AI coding agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "concord-git"
+description = "Git plumbing for Concord: reading trees, diffs, in-memory merges, worktree snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

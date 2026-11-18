@@ -1,0 +1,25 @@
+[package]
+name = "concord-cli"
+description = "The `concord` command-line tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "concord"
+path = "src/main.rs"
+
+[dependencies]
+concord-core.workspace = true
+concord-lang.workspace = true
+concord-git.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

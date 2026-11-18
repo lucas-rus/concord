@@ -1,0 +1,16 @@
+[package]
+name = "concord-lang"
+description = "Language front-ends for Concord: symbols, contracts, bodies and references (tree-sitter)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+concord-core.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+serde.workspace = true
+thiserror.workspace = true
