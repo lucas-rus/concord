@@ -12,7 +12,8 @@ Aligned with the thesis work plan (defence: summer 2027).
 
 ## M1: RQ1 analysis on CooperBench (Dec 2026)
 
-- [ ] `eval/rq1`: turn every CooperBench feature pair (`feature<N>/feature.patch`) into branches on the task's base commit and run `concord analyze --json`
+- [x] Breaking vs. compatible contract changes (structured signatures, `compat::classify`)
+- [x] `eval/rq1/run_rq1.py`: turn every CooperBench feature pair (`feature<N>/feature.patch`) into branches on the task's base commit and run `concord analyze --json` (textual results match CooperBench's gold conflict report)
 - [ ] Report: how often file overlap hides disjoint symbols; how often pairs are coupled through cross-file contracts; same-symbol edits
 - [ ] Resolver quality: precision/recall of `RepoIndex` uses against scip-python / basedpyright on the 9 Python repos
 

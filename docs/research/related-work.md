@@ -39,6 +39,7 @@ A living index of the research and tools Concord builds on. Numbers are quoted f
 | [merge-semantics](https://github.com/shouvikkkk/merge-semantics) | Post-merge semantic checker | Finding taxonomy (removed-still-referenced, rename-vs-old-caller) |
 | Worktree managers ([Claude Squad](https://github.com/smtg-ai/claude-squad), [Vibe Kanban](https://github.com/BloopAI/vibe-kanban)) | Parallel sessions in worktrees | Isolation only |
 | [Serena](https://github.com/oraios/serena) | LSP-backed symbol tools for agents | SolidLSP design for driving ty/pyright/pyrefly (MIT part only) |
+| [Griffe](https://github.com/mkdocstrings/griffe) (ISC), [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) | API breaking-change detection between releases | Inspiration for `compat::classify`; Griffe is a possible oracle for validating it |
 | [aider repo map](https://github.com/Aider-AI/aider) | tree-sitter tags + PageRank | Ranking which use sites to show in notices |
 
 ## Foundations

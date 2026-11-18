@@ -15,6 +15,11 @@ This document summarises the model and protocol implemented in `concord-core` an
   - Contract change: the digests differ, or the symbol was removed, or it was renamed (a removed and an added symbol with an identical body in the same file).
   - Body change: same contract, different body.
   - Added symbol.
+- **Breaking vs. compatible.** Code: `concord_core::compat::classify`. Front-ends also extract a structured **signature**:
+  - for functions: parameters with kind (positional-only, positional-or-keyword, `*args`, keyword-only, `**kwargs`), annotation and default; return annotation; decorators; `async`;
+  - for classes: the constructor, taken from `__init__` without `self`, or synthesised from annotated fields; plus bases.
+
+  A contract change is **breaking** if a call site valid against the old signature may be invalid against the new one. Examples: a removed or renamed parameter, a new required parameter, a parameter that became keyword-only, reordered positional parameters, a default removed, a changed annotation or return type, an added or removed decorator, a removed base. Otherwise it is **compatible**: new optional parameters, `*args`/`**kwargs`, relaxed parameter kinds, new bases. Without a signature (e.g. overloads), the rules are conservative and count the change as breaking. Compatible changes still produce informational notices but never close the finish gate. This is similar in spirit to API-breakage checkers such as [Griffe](https://github.com/mkdocstrings/griffe) and [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks), but applied to in-flight agent work and to call sites in other agents' branches.
 - **Uses.** `(τ, σ)` means the declaration or body of `τ` references `σ`: a call, attribute chain, name, import, decorator, base class or annotation. Code: `concord_lang::RepoIndex::resolve`. Resolution order:
   1. `self.x` / `cls.x` resolve to the enclosing class;
   2. import bindings, including `import a.b` chains, aliases, relative imports and `*`;
@@ -35,7 +40,7 @@ Per (agent, symbol) state, with its MESI analogue:
 |---|---|---|---|
 | none | Invalid | no interest | – |
 | `Shared` | Shared | reads/uses σ, has seen its latest contract | – |
-| `Stale` | Invalid + notice | another agent published a newer contract | notice sent; finish gate closed if σ ∈ U ∪ W |
+| `Stale` | Invalid + notice | another agent published a newer, **breaking** contract | notice sent; finish gate closed if σ ∈ U ∪ W |
 | `Body` | Modified (body) | changed only σ's body (or added it) | never blocks |
 | `Owner` | Modified/Exclusive | holds the contract lease of σ | other contract edits of σ get `LeaseHeld`; dependents get a heads-up |
 

@@ -31,7 +31,11 @@ The two agents touch different files, so git merges cleanly, file locks see no c
 Files are the wrong unit of coordination. Agents break each other through **contracts**: the signatures, types, exported names and schemas that other code depends on. Concord treats every agent's worktree like a CPU cache and every symbol like a cache line, and runs a **coherence protocol** over them:
 
 1. **Infer, don't ask.** It watches what each agent actually reads and edits (hooks, diffs) and maps it onto a symbol graph, giving a *footprint* per agent: symbols read, written, and used by the agent's new code.
-2. **Contract vs. body.** Every symbol is split into its contract and its body. Body edits never block anyone. Only concurrent edits to the *same contract* are serialised, through a short lease.
+2. **Contract vs. body, breaking vs. compatible.** Every symbol is split into its contract and its body. Body edits never block anyone. Contract changes are classified from structured signatures:
+   - **breaking**, e.g. a new required parameter;
+   - **compatible**, e.g. a new optional parameter, which only produces an informational notice.
+
+   Only concurrent edits to the *same contract* are serialised, through a short lease.
 3. **Precise notices + finish gate.** When a contract changes, Concord sends a short, generated notice only to the agents whose footprint depends on it. The notice has the old and new contract and the recipient's exact call sites. An agent cannot finish while it depends on a stale contract.
 4. **Speculative integration.** In the background, all branches are merged in memory, type-checked, and the affected tests are run, to catch whatever the contract model misses.
 
@@ -53,8 +57,9 @@ Output (abridged):
 
 ```text
 Findings
-  CONTRACT   agent-a -> agent-b: notify.email.send_email   (no shared files: invisible to textual merge and file locks)
+  BREAKING   agent-a -> agent-b: notify.email.send_email   (no shared files: invisible to textual merge and file locks)
              now: def send_email(to, body, *, user_id)
+             what: new required parameter `user_id`
              auth/reset.py:11  request_reset: send_email(user.email, reset_msg(token))
   FILE       agent-a & agent-c: notify/email.py   disjoint symbols (a file lock would serialise this needlessly)
 
@@ -65,9 +70,10 @@ Textual merge (git merge-tree)
 
 Protocol simulation (notices each agent would receive)
   -> to agent-b
-     [concord] contract change: notify.email.send_email   v0 -> v1   (by agent-a)
+     [concord] BREAKING contract change: notify.email.send_email   v0 -> v1   (by agent-a)
        before: def send_email(to, body)
        after : def send_email(to, body, *, user_id)
+       what  : new required parameter `user_id`
        your code that depends on it:
          auth/reset.py:11  request_reset: send_email(user.email, reset_msg(token))
   Finish gates:
