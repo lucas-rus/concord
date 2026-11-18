@@ -66,6 +66,7 @@ pub enum NoticeKind {
         by: AgentId,
         before: Option<Contract>,
         pending: Option<Contract>,
+        breaking: bool,
     },
     /// Another agent published a new contract (`after == None` means removed).
     ContractChanged {
@@ -74,6 +75,10 @@ pub enum NoticeKind {
         before: Option<Contract>,
         after: Option<Contract>,
         rationale: Option<String>,
+        /// Whether call sites written against `before` may break.
+        breaking: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reasons: Vec<String>,
     },
     /// You changed a contract whose lease is held by another agent.
     LeaseHeld { owner: AgentId },
@@ -106,9 +111,16 @@ impl Notice {
                 before,
                 after,
                 rationale,
+                breaking,
+                reasons,
             } => {
                 out.push_str(&format!(
-                    "[concord] contract change: {}   v{} -> v{}   (by {})\n",
+                    "[concord] {}: {}   v{} -> v{}   (by {})\n",
+                    if *breaking {
+                        "BREAKING contract change"
+                    } else {
+                        "compatible contract change"
+                    },
                     self.symbol,
                     version - 1,
                     version,
@@ -116,16 +128,26 @@ impl Notice {
                 ));
                 out.push_str(&format!("  before: {}\n", contract(before)));
                 out.push_str(&format!("  after : {}\n", contract(after)));
+                if !reasons.is_empty() {
+                    let shown: Vec<&str> = reasons.iter().take(3).map(String::as_str).collect();
+                    out.push_str(&format!("  what  : {}\n", shown.join("; ")));
+                }
                 if let Some(r) = rationale {
                     out.push_str(&format!("  reason: {by}'s task is \"{r}\"\n"));
                 }
                 self.push_sites(&mut out);
-                out.push_str(&format!(
-                    "  status: completion of your task is gated until your uses conform to v{version} \
-                     or the change is negotiated with {by}.\n"
-                ));
+                if *breaking {
+                    out.push_str(&format!(
+                        "  status: completion of your task is gated until your uses conform to v{version} \
+                         or the change is negotiated with {by}.\n"
+                    ));
+                } else {
+                    out.push_str("  status: existing call sites remain valid; informational only.\n");
+                }
             }
-            NoticeKind::HeadsUp { by, before, pending } => {
+            NoticeKind::HeadsUp {
+                by, before, pending, ..
+            } => {
                 out.push_str(&format!(
                     "[concord] heads-up: {} is changing the contract of {}\n",
                     by, self.symbol
@@ -185,12 +207,17 @@ struct Published {
     contract: Option<Contract>,
     by: Option<AgentId>,
     rationale: Option<String>,
+    /// Breaking relative to the base revision (any breaking step since).
+    breaking_since_base: bool,
+    reasons_since_base: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Pending {
     before: Option<Contract>,
     after: Option<Contract>,
+    breaking: bool,
+    reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -359,11 +386,15 @@ impl Directory {
                 _ => {
                     let first = entry.owner.is_none();
                     entry.owner = Some(agent.clone());
+                    let breaking = c.is_breaking();
                     entry.pending = Some(Pending {
                         before: entry.current_contract(),
                         after: c.after.clone(),
+                        breaking,
+                        reasons: c.compat.as_ref().map(|x| x.reasons.clone()).unwrap_or_default(),
                     });
-                    if first {
+                    // Heads-ups are only worth an interruption for breaking changes.
+                    if first && breaking {
                         let before = entry.current_contract();
                         let pending = c.after.clone();
                         for (b, be) in self.agents.iter_mut().filter(|(b, _)| *b != agent) {
@@ -375,6 +406,7 @@ impl Directory {
                                         by: agent.clone(),
                                         before: before.clone(),
                                         pending: pending.clone(),
+                                        breaking,
                                     },
                                     sites: be.uses.get(&c.symbol).cloned().unwrap_or_default(),
                                 });
@@ -420,11 +452,19 @@ impl Directory {
             return vec![];
         };
         let version = entry.version() + 1;
+        let (prev_breaking, mut reasons_since_base) = entry
+            .published
+            .as_ref()
+            .map(|p| (p.breaking_since_base, p.reasons_since_base.clone()))
+            .unwrap_or((false, Vec::new()));
+        reasons_since_base.extend(pending.reasons.iter().cloned());
         entry.published = Some(Published {
             version,
             contract: pending.after.clone(),
             by: Some(agent.clone()),
             rationale: task.clone(),
+            breaking_since_base: prev_breaking || pending.breaking,
+            reasons_since_base,
         });
 
         if let Some(a) = self.agents.get_mut(agent) {
@@ -433,7 +473,11 @@ impl Directory {
         let mut notices = Vec::new();
         for (b, be) in self.agents.iter_mut().filter(|(b, _)| *b != agent) {
             if be.interested_in(symbol) {
-                be.stale.insert(symbol.clone());
+                if pending.breaking {
+                    be.stale.insert(symbol.clone());
+                } else {
+                    be.seen.insert(symbol.clone(), version);
+                }
                 notices.push(Notice {
                     to: b.clone(),
                     symbol: symbol.clone(),
@@ -443,6 +487,8 @@ impl Directory {
                         before: pending.before.clone(),
                         after: pending.after.clone(),
                         rationale: task.clone(),
+                        breaking: pending.breaking,
+                        reasons: pending.reasons.clone(),
                     },
                     sites: be.uses.get(symbol).cloned().unwrap_or_default(),
                 });
@@ -516,7 +562,11 @@ impl Directory {
             && p.by.as_ref() != Some(agent)
             && p.version > seen
         {
-            a.stale.insert(s.clone());
+            if p.breaking_since_base {
+                a.stale.insert(s.clone());
+            } else {
+                a.seen.insert(s.clone(), p.version);
+            }
             out.push(Notice {
                 to: agent.clone(),
                 symbol: s.clone(),
@@ -526,6 +576,8 @@ impl Directory {
                     before: entry.base.clone(),
                     after: p.contract.clone(),
                     rationale: p.rationale.clone(),
+                    breaking: p.breaking_since_base,
+                    reasons: p.reasons_since_base.clone(),
                 },
                 sites: a.uses.get(s).cloned().unwrap_or_default(),
             });
@@ -533,7 +585,7 @@ impl Directory {
         }
         if let (Some(owner), Some(pending)) = (&entry.owner, &entry.pending) {
             // A contending agent already received a LeaseHeld notice.
-            if owner != agent && !a.contended.contains(s) && a.warned.insert(s.clone()) {
+            if owner != agent && pending.breaking && !a.contended.contains(s) && a.warned.insert(s.clone()) {
                 out.push(Notice {
                     to: agent.clone(),
                     symbol: s.clone(),
@@ -541,6 +593,7 @@ impl Directory {
                         by: owner.clone(),
                         before: pending.before.clone(),
                         pending: pending.after.clone(),
+                        breaking: pending.breaking,
                     },
                     sites: a.uses.get(s).cloned().unwrap_or_default(),
                 });
@@ -567,6 +620,7 @@ mod tests {
             kind,
             before: before.map(contract),
             after: after.map(contract),
+            compat: None,
         }
     }
 
@@ -741,6 +795,46 @@ mod tests {
         assert_eq!(d.owner(&SymbolId::new(SEND)), Some(&a));
         d.observe_footprint(&a, &[], BTreeMap::new());
         assert_eq!(d.owner(&SymbolId::new(SEND)), None);
+    }
+
+    #[test]
+    fn compatible_changes_inform_but_never_gate() {
+        let (a, b) = (AgentId::new("A"), AgentId::new("B"));
+        let mut d = Directory::new();
+        d.observe_footprint(
+            &b,
+            &[change(
+                "auth.reset.request_reset",
+                ChangeKind::Added,
+                None,
+                Some("def request_reset(user)"),
+            )],
+            uses(
+                SEND,
+                "auth/reset.py",
+                4,
+                "auth.reset.request_reset",
+                "send_email(user.email, msg)",
+            ),
+        );
+        let mut ch = change(
+            SEND,
+            ChangeKind::ContractChanged,
+            Some("def send_email(to, body)"),
+            Some("def send_email(to, body, retries=3)"),
+        );
+        ch.compat = Some(crate::compat::Compat {
+            breaking: false,
+            reasons: vec!["new optional parameter `retries`".into()],
+        });
+        let n = d.observe_footprint(&a, &[ch], BTreeMap::new());
+        assert!(n.is_empty(), "no heads-up for compatible changes");
+        let n = d.publish_all(&a);
+        assert_eq!(n.len(), 1);
+        assert!(n[0].render().contains("compatible contract change"));
+        assert!(n[0].render().contains("informational only"));
+        assert!(d.finish_gate(&b).is_open());
+        assert_eq!(d.state(&b, &SymbolId::new(SEND)), Some(CoherenceState::Shared));
     }
 
     #[test]

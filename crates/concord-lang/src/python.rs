@@ -12,7 +12,7 @@
 //! verbatim), so formatting and comments never produce a change.
 
 use crate::{FileIndex, ImportBinding, LangError, RawRef};
-use concord_core::{Contract, Digest, Span, Symbol, SymbolId, SymbolKind};
+use concord_core::{Contract, Digest, Param, ParamKind, Signature, Span, Symbol, SymbolId, SymbolKind};
 use std::collections::BTreeMap;
 use tree_sitter::{Node, Parser};
 
@@ -93,6 +93,7 @@ struct Builder {
     display: String,
     contract_canon: String,
     body_canon: String,
+    signature: Option<Signature>,
     defs: usize,
 }
 
@@ -111,6 +112,8 @@ impl Builder {
             contract: Contract {
                 display,
                 digest: Digest::of(&self.contract_canon),
+                // Several definitions (overloads, property setters): no single signature.
+                signature: if self.defs == 1 { self.signature } else { None },
             },
             body: Digest::of(&self.body_canon),
         }
@@ -132,6 +135,7 @@ impl<'a> Extractor<'a> {
         n.utf8_text(self.src).unwrap_or("")
     }
 
+    #[allow(clippy::too_many_arguments)] // private helper; a parameter struct would add noise
     fn add_symbol(
         &mut self,
         id: SymbolId,
@@ -140,6 +144,7 @@ impl<'a> Extractor<'a> {
         display: String,
         contract_canon: String,
         body_canon: String,
+        signature: Option<Signature>,
     ) {
         let span = span_of(node);
         match self.builders.get_mut(&id) {
@@ -163,6 +168,7 @@ impl<'a> Extractor<'a> {
                         display,
                         contract_canon,
                         body_canon,
+                        signature,
                         defs: 1,
                     },
                 );
@@ -280,7 +286,14 @@ impl<'a> Extractor<'a> {
             display.push_str(&collapse_ws(self.text(r)));
         }
         let body_canon = body.map(|b| self.canon(b)).unwrap_or_default();
-        self.add_symbol(id.clone(), kind, outer, display, canon, body_canon);
+        let signature = Signature {
+            params: params.map(|p| self.params_of(p)).unwrap_or_default(),
+            returns: ret.map(|r| self.canon(r)),
+            decorators: decorators.iter().map(|d| self.canon(*d)).collect(),
+            is_async,
+            bases: Vec::new(),
+        };
+        self.add_symbol(id.clone(), kind, outer, display, canon, body_canon, Some(signature));
 
         // References: decorators, parameter annotations/defaults, return type, body.
         for d in decorators {
@@ -338,6 +351,7 @@ impl<'a> Extractor<'a> {
         // Constructor-relevant parts of the contract: annotated fields
         // (dataclass/attrs/pydantic style) and the __init__ signature.
         let mut fields_display = Vec::new();
+        let mut field_params: Vec<Param> = Vec::new();
         let mut body_canon = String::new();
         if let Some(b) = body {
             let mut c = b.walk();
@@ -353,6 +367,16 @@ impl<'a> Extractor<'a> {
                             let left = a.child_by_field_name("left").map(|n| self.canon(n)).unwrap_or_default();
                             let ty = a.child_by_field_name("type").map(|n| self.canon(n)).unwrap_or_default();
                             let has_default = a.child_by_field_name("right").is_some();
+                            field_params.push(Param {
+                                name: a
+                                    .child_by_field_name("left")
+                                    .map(|n| self.text(n))
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                kind: ParamKind::PositionalOrKeyword,
+                                annotation: Some(ty.clone()),
+                                default: a.child_by_field_name("right").map(|r| self.canon(r)),
+                            });
                             canon.push_str(&format!(" | {left} : {ty}{}", if has_default { " =" } else { "" }));
                             fields_display.push(format!(
                                 "{}: {}{}",
@@ -394,7 +418,40 @@ impl<'a> Extractor<'a> {
             display.push_str(&extra.join("; "));
         }
 
-        self.add_symbol(id.clone(), SymbolKind::Class, outer, display, canon, body_canon);
+        // Constructor signature: __init__ without `self`, else synthesised from
+        // annotated fields, else empty if there is no base class to inherit from.
+        let init_sig = self
+            .builders
+            .get(&init_id)
+            .and_then(|b| if b.defs == 1 { b.signature.clone() } else { None });
+        let bases_canon: Vec<String> = bases
+            .map(|bs| {
+                let mut c = bs.walk();
+                bs.named_children(&mut c).map(|n| self.canon(n)).collect()
+            })
+            .unwrap_or_default();
+        let ctor_params: Option<Vec<Param>> = match init_sig {
+            Some(sig) => Some(sig.params.into_iter().skip(1).collect()),
+            None if !field_params.is_empty() => Some(field_params),
+            None if bases_canon.is_empty() => Some(Vec::new()),
+            None => None,
+        };
+        let signature = ctor_params.map(|params| Signature {
+            params,
+            returns: None,
+            decorators: decorators.iter().map(|d| self.canon(*d)).collect(),
+            is_async: false,
+            bases: bases_canon,
+        });
+        self.add_symbol(
+            id.clone(),
+            SymbolKind::Class,
+            outer,
+            display,
+            canon,
+            body_canon,
+            signature,
+        );
         for d in decorators {
             self.collect_refs(*d, &id);
         }
@@ -420,7 +477,7 @@ impl<'a> Extractor<'a> {
                     display.push_str(&collapse_ws(self.text(t)));
                 }
                 let body = right.map(|r| self.canon(r)).unwrap_or_default();
-                self.add_symbol(id, SymbolKind::Variable, stmt, display, canon, body);
+                self.add_symbol(id, SymbolKind::Variable, stmt, display, canon, body, None);
                 if let Some(t) = ty {
                     self.collect_refs(t, &scope.prefix.child(&name));
                 }
@@ -517,6 +574,88 @@ impl<'a> Extractor<'a> {
             }
             _ => {}
         }
+    }
+
+    /// Structured parameters of a `parameters` node.
+    fn params_of(&self, params: Node) -> Vec<Param> {
+        let mut out: Vec<Param> = Vec::new();
+        let mut kw_only = false;
+        let named_kind = |kw_only: bool| {
+            if kw_only {
+                ParamKind::KeywordOnly
+            } else {
+                ParamKind::PositionalOrKeyword
+            }
+        };
+        let mut c = params.walk();
+        for ch in params.named_children(&mut c) {
+            match ch.kind() {
+                "identifier" => out.push(Param {
+                    name: self.text(ch).to_owned(),
+                    kind: named_kind(kw_only),
+                    annotation: None,
+                    default: None,
+                }),
+                "default_parameter" | "typed_default_parameter" => {
+                    let Some(name) = ch.child_by_field_name("name") else {
+                        continue;
+                    };
+                    out.push(Param {
+                        name: self.text(name).to_owned(),
+                        kind: named_kind(kw_only),
+                        annotation: ch.child_by_field_name("type").map(|t| self.canon(t)),
+                        default: ch.child_by_field_name("value").map(|v| self.canon(v)),
+                    });
+                }
+                "typed_parameter" => {
+                    let annotation = ch.child_by_field_name("type").map(|t| self.canon(t));
+                    let Some(inner) = ch.named_child(0) else { continue };
+                    let (name, kind) = match inner.kind() {
+                        "list_splat_pattern" => {
+                            kw_only = true;
+                            (
+                                inner.named_child(0).map(|n| self.text(n)).unwrap_or("args"),
+                                ParamKind::VarPositional,
+                            )
+                        }
+                        "dictionary_splat_pattern" => (
+                            inner.named_child(0).map(|n| self.text(n)).unwrap_or("kwargs"),
+                            ParamKind::VarKeyword,
+                        ),
+                        _ => (self.text(inner), named_kind(kw_only)),
+                    };
+                    out.push(Param {
+                        name: name.to_owned(),
+                        kind,
+                        annotation,
+                        default: None,
+                    });
+                }
+                "list_splat_pattern" => {
+                    kw_only = true;
+                    out.push(Param {
+                        name: ch.named_child(0).map(|n| self.text(n)).unwrap_or("args").to_owned(),
+                        kind: ParamKind::VarPositional,
+                        annotation: None,
+                        default: None,
+                    });
+                }
+                "dictionary_splat_pattern" => out.push(Param {
+                    name: ch.named_child(0).map(|n| self.text(n)).unwrap_or("kwargs").to_owned(),
+                    kind: ParamKind::VarKeyword,
+                    annotation: None,
+                    default: None,
+                }),
+                "keyword_separator" => kw_only = true,
+                "positional_separator" => {
+                    for p in out.iter_mut().filter(|p| p.kind == ParamKind::PositionalOrKeyword) {
+                        p.kind = ParamKind::PositionalOnly;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn resolve_relative(&self, rel: Node) -> String {
@@ -815,6 +954,62 @@ class Cart(Base):
         let a = index_file("m.py", "class C:\n    def __init__(self, x):\n        pass\n").unwrap();
         let b = index_file("m.py", "class C:\n    def __init__(self, x, y):\n        pass\n").unwrap();
         assert_ne!(sym(&a, "m.C").contract.digest, sym(&b, "m.C").contract.digest);
+    }
+
+    #[test]
+    fn extracts_structured_signatures() {
+        let f = index_file(
+            "m.py",
+            "def f(a, /, b: int, c=1, *args, d, e: str = 'x', **kw) -> bool:\n    pass\n",
+        )
+        .unwrap();
+        let sig = f.symbols[0].contract.signature.as_ref().unwrap();
+        let kinds: Vec<(&str, ParamKind, bool)> = sig
+            .params
+            .iter()
+            .map(|p| (p.name.as_str(), p.kind, p.has_default()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("a", ParamKind::PositionalOnly, false),
+                ("b", ParamKind::PositionalOrKeyword, false),
+                ("c", ParamKind::PositionalOrKeyword, true),
+                ("args", ParamKind::VarPositional, false),
+                ("d", ParamKind::KeywordOnly, false),
+                ("e", ParamKind::KeywordOnly, true),
+                ("kw", ParamKind::VarKeyword, false),
+            ]
+        );
+        assert_eq!(sig.returns.as_deref(), Some("bool"));
+    }
+
+    #[test]
+    fn breaking_vs_compatible_changes_end_to_end() {
+        use concord_core::diff_symbols;
+        let base = index_file(
+            "m.py",
+            "def send(to, body):\n    pass\n\nclass E:\n    def __init__(self, a):\n        pass\n",
+        )
+        .unwrap();
+        let compatible = index_file(
+            "m.py",
+            "def send(to, body, *, retries=3):\n    pass\n\nclass E:\n    def __init__(self, a, b=None):\n        pass\n",
+        )
+        .unwrap();
+        let breaking = index_file(
+            "m.py",
+            "def send(to, body, *, user_id):\n    pass\n\nclass E:\n    def __init__(self, b):\n        pass\n",
+        )
+        .unwrap();
+        let c = diff_symbols(&base.symbols, &compatible.symbols);
+        assert!(
+            c.iter().filter(|c| c.is_contract_change()).all(|c| !c.is_breaking()),
+            "{c:#?}"
+        );
+        let b = diff_symbols(&base.symbols, &breaking.symbols);
+        assert!(b.iter().any(|c| c.symbol.as_str() == "m.send" && c.is_breaking()));
+        assert!(b.iter().any(|c| c.symbol.as_str() == "m.E" && c.is_breaking()));
     }
 
     #[test]

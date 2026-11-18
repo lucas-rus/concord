@@ -96,11 +96,14 @@ pub fn analysis(a: &Analysis, sim: Option<&Simulation>) -> String {
                 after,
                 sites,
                 file_disjoint,
+                breaking,
+                reasons,
                 ..
             } => {
                 let _ = writeln!(
                     out,
-                    "  CONTRACT   {producer} -> {consumer}: {symbol}{}",
+                    "  {}   {producer} -> {consumer}: {symbol}{}",
+                    if *breaking { "BREAKING" } else { "COMPAT  " },
                     if *file_disjoint {
                         "   (no shared files: invisible to textual merge and file locks)"
                     } else {
@@ -112,6 +115,13 @@ pub fn analysis(a: &Analysis, sim: Option<&Simulation>) -> String {
                     "             now: {}",
                     after.as_ref().map(|c| c.display.as_str()).unwrap_or("(removed)")
                 );
+                if !reasons.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "             what: {}",
+                        reasons.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+                    );
+                }
                 for s in sites {
                     let _ = writeln!(out, "             {}:{}  {}: {}", s.path, s.line, s.from.name(), s.text);
                 }
@@ -170,10 +180,11 @@ pub fn analysis(a: &Analysis, sim: Option<&Simulation>) -> String {
     let s = &a.summary;
     let _ = writeln!(
         out,
-        "\nSummary: {} contract dependencies ({} across disjoint files), {} file overlaps ({} symbol-disjoint), \
-         {} same-symbol edits ({} body-only), {} duplicate definitions",
+        "\nSummary: {} contract dependencies ({} breaking, {} breaking across disjoint files), {} file overlaps \
+         ({} symbol-disjoint), {} same-symbol edits ({} body-only), {} duplicate definitions",
         s.contract_dependencies,
-        s.contract_dependencies_file_disjoint,
+        s.breaking_contract_dependencies,
+        s.breaking_contract_dependencies_file_disjoint,
         s.file_overlaps,
         s.file_overlaps_symbol_disjoint,
         s.same_symbol,

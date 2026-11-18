@@ -77,6 +77,10 @@ impl Digest {
 pub struct Contract {
     pub display: String,
     pub digest: Digest,
+    /// Structured call signature, when the front-end can extract one. Used to
+    /// tell breaking from compatible contract changes ([`crate::compat`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Signature>,
 }
 
 impl Contract {
@@ -84,8 +88,61 @@ impl Contract {
         Contract {
             display: display.into(),
             digest: Digest::of(canonical),
+            signature: None,
         }
     }
+
+    pub fn with_signature(mut self, signature: Signature) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamKind {
+    /// Before `/`.
+    PositionalOnly,
+    PositionalOrKeyword,
+    /// `*args`.
+    VarPositional,
+    /// After `*` or `*args`.
+    KeywordOnly,
+    /// `**kwargs`.
+    VarKeyword,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Param {
+    pub name: String,
+    pub kind: ParamKind,
+    /// Canonical annotation text, if annotated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
+    /// Canonical default value text, if the parameter has a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+impl Param {
+    pub fn has_default(&self) -> bool {
+        self.default.is_some()
+    }
+}
+
+/// How a symbol is called: parameters, return annotation, decorators, and for
+/// classes the constructor parameters and bases.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Signature {
+    pub params: Vec<Param>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decorators: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_async: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bases: Vec<String>,
 }
 
 /// 1-based, inclusive line range.

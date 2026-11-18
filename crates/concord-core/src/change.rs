@@ -1,5 +1,6 @@
 //! Classifying symbol-level changes between two versions of a program.
 
+use crate::compat::{Compat, classify};
 use crate::symbol::{Contract, Symbol, SymbolId, SymbolKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -28,6 +29,10 @@ pub struct SymbolChange {
     pub kind: ChangeKind,
     pub before: Option<Contract>,
     pub after: Option<Contract>,
+    /// For `ContractChanged` with structured signatures on both sides: whether
+    /// existing call sites may break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<Compat>,
 }
 
 impl SymbolChange {
@@ -37,6 +42,16 @@ impl SymbolChange {
             self.kind,
             ChangeKind::Removed | ChangeKind::Renamed { .. } | ChangeKind::ContractChanged
         )
+    }
+
+    /// True if call sites written against the old contract may stop working.
+    /// Without a structured signature every contract change counts as breaking.
+    pub fn is_breaking(&self) -> bool {
+        match self.kind {
+            ChangeKind::Removed | ChangeKind::Renamed { .. } => true,
+            ChangeKind::ContractChanged => self.compat.as_ref().is_none_or(|c| c.breaking),
+            _ => false,
+        }
     }
 
     pub fn is_body_change(&self) -> bool {
@@ -69,6 +84,10 @@ pub fn diff_symbols<'a>(
                         kind: ChangeKind::ContractChanged,
                         before: Some(old.contract.clone()),
                         after: Some(new.contract.clone()),
+                        compat: match (&old.contract.signature, &new.contract.signature) {
+                            (Some(a), Some(b)) => Some(classify(a, b)),
+                            _ => None,
+                        },
                     });
                 } else if old.body != new.body {
                     changes.push(SymbolChange {
@@ -78,6 +97,7 @@ pub fn diff_symbols<'a>(
                         kind: ChangeKind::BodyChanged,
                         before: Some(old.contract.clone()),
                         after: Some(new.contract.clone()),
+                        compat: None,
                     });
                 }
             }
@@ -119,6 +139,7 @@ pub fn diff_symbols<'a>(
                     },
                     before: Some(old.contract.clone()),
                     after: Some(added[i].contract.clone()),
+                    compat: None,
                 });
             }
             None => changes.push(SymbolChange {
@@ -128,6 +149,7 @@ pub fn diff_symbols<'a>(
                 kind: ChangeKind::Removed,
                 before: Some(old.contract.clone()),
                 after: None,
+                compat: None,
             }),
         }
     }
@@ -140,6 +162,7 @@ pub fn diff_symbols<'a>(
                 kind: ChangeKind::Added,
                 before: None,
                 after: Some(new.contract.clone()),
+                compat: None,
             });
         }
     }

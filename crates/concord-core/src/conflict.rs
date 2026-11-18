@@ -22,6 +22,8 @@ pub struct BranchFootprint {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// A report type, built once per analysis: variant size does not matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Finding {
     /// Both branches modify the same file. If `shared_symbols` is empty the edits
     /// are disjoint at symbol level, so file-level locking would serialise them
@@ -48,6 +50,10 @@ pub enum Finding {
         before: Option<Contract>,
         after: Option<Contract>,
         sites: Vec<UseSite>,
+        /// Whether call sites written against `before` may break.
+        breaking: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reasons: Vec<String>,
         /// True if the two branches touch no common file, i.e. the conflict is
         /// invisible to file-level coordination and to textual merge.
         file_disjoint: bool,
@@ -116,6 +122,8 @@ fn pair(a: &BranchFootprint, b: &BranchFootprint, out: &mut Vec<Finding>) {
                     before: c.before.clone(),
                     after: c.after.clone(),
                     sites: sites.clone(),
+                    breaking: c.is_breaking(),
+                    reasons: c.compat.as_ref().map(|x| x.reasons.clone()).unwrap_or_default(),
                     file_disjoint,
                 });
             }
@@ -134,6 +142,9 @@ pub struct Summary {
     pub contract_dependencies: usize,
     /// Contract dependencies between branches that share no file.
     pub contract_dependencies_file_disjoint: usize,
+    /// Contract dependencies where the change may break the consumer's call sites.
+    pub breaking_contract_dependencies: usize,
+    pub breaking_contract_dependencies_file_disjoint: usize,
     pub duplicate_definitions: usize,
 }
 
@@ -153,10 +164,20 @@ pub fn summarize(findings: &[Finding]) -> Summary {
                     s.same_symbol_both_body_only += 1;
                 }
             }
-            Finding::ContractDependency { file_disjoint, .. } => {
+            Finding::ContractDependency {
+                file_disjoint,
+                breaking,
+                ..
+            } => {
                 s.contract_dependencies += 1;
                 if *file_disjoint {
                     s.contract_dependencies_file_disjoint += 1;
+                }
+                if *breaking {
+                    s.breaking_contract_dependencies += 1;
+                    if *file_disjoint {
+                        s.breaking_contract_dependencies_file_disjoint += 1;
+                    }
                 }
             }
             Finding::DuplicateDefinition { .. } => s.duplicate_definitions += 1,
@@ -178,6 +199,7 @@ mod tests {
             kind,
             before: None,
             after: None,
+            compat: None,
         }
     }
 
