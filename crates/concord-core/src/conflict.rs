@@ -6,6 +6,8 @@
 //! of the `concord analyze` command.
 
 use crate::change::{ChangeKind, SymbolChange};
+use crate::compat::check_call;
+use crate::symbol::SymbolKind;
 use crate::symbol::{Contract, SymbolId, UseSite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,8 +52,12 @@ pub enum Finding {
         before: Option<Contract>,
         after: Option<Contract>,
         sites: Vec<UseSite>,
-        /// Whether call sites written against `before` may break.
+        /// Whether call sites written against `before` may break (in general).
         breaking: bool,
+        /// Concrete problems of the consumer's own uses against the new contract
+        /// (calls checked against the new signature; any use of a removed symbol).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        violations: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reasons: Vec<String>,
         /// True if the two branches touch no common file, i.e. the conflict is
@@ -123,12 +129,50 @@ fn pair(a: &BranchFootprint, b: &BranchFootprint, out: &mut Vec<Finding>) {
                     after: c.after.clone(),
                     sites: sites.clone(),
                     breaking: c.is_breaking(),
+                    violations: violations(c, sites),
                     reasons: c.compat.as_ref().map(|x| x.reasons.clone()).unwrap_or_default(),
                     file_disjoint,
                 });
             }
         }
     }
+}
+
+/// Problems of `sites` against the contract after change `c`.
+pub fn violations(c: &SymbolChange, sites: &[UseSite]) -> Vec<String> {
+    if !c.is_breaking() {
+        return vec![];
+    }
+    let Some(after) = &c.after else {
+        return sites
+            .iter()
+            .map(|s| format!("{}:{}  {}  -> `{}` no longer exists", s.path, s.line, s.text, c.symbol))
+            .collect();
+    };
+    if matches!(c.kind, ChangeKind::Renamed { .. }) {
+        return sites
+            .iter()
+            .map(|s| format!("{}:{}  {}  -> renamed to {}", s.path, s.line, s.text, after.display))
+            .collect();
+    }
+    let Some(sig) = &after.signature else {
+        // No structured signature: cannot check calls, keep the conservative flag.
+        return sites
+            .iter()
+            .filter(|s| s.call.is_some())
+            .map(|s| format!("{}:{}  {}  -> contract changed (unchecked)", s.path, s.line, s.text))
+            .collect();
+    };
+    let bound = c.symbol_kind == SymbolKind::Method && !sig.decorators.iter().any(|d| d.contains("staticmethod"));
+    let mut out = Vec::new();
+    for s in sites {
+        if let Some(call) = &s.call {
+            for p in check_call(sig, call, bound) {
+                out.push(format!("{}:{}  {}  -> {p}", s.path, s.line, s.text));
+            }
+        }
+    }
+    out
 }
 
 /// Aggregate counts over findings (one row per analysed task in RQ1).
@@ -145,6 +189,8 @@ pub struct Summary {
     /// Contract dependencies where the change may break the consumer's call sites.
     pub breaking_contract_dependencies: usize,
     pub breaking_contract_dependencies_file_disjoint: usize,
+    /// Contract dependencies where the consumer's own call sites violate the new contract.
+    pub violating_contract_dependencies: usize,
     pub duplicate_definitions: usize,
 }
 
@@ -167,8 +213,12 @@ pub fn summarize(findings: &[Finding]) -> Summary {
             Finding::ContractDependency {
                 file_disjoint,
                 breaking,
+                violations,
                 ..
             } => {
+                if !violations.is_empty() {
+                    s.violating_contract_dependencies += 1;
+                }
                 s.contract_dependencies += 1;
                 if *file_disjoint {
                     s.contract_dependencies_file_disjoint += 1;

@@ -151,9 +151,10 @@ impl RepoIndex {
         if (head == "self" || head == "cls")
             && !rest.is_empty()
             && let Some(class) = self.enclosing_class(&r.from)
-            && let Some(s) = self.longest_prefix(class.as_str(), rest)
         {
-            return Some(s);
+            // `self.x.y`: only a known member counts. Reading an instance attribute
+            // is not a use of the class (its constructor contract).
+            return self.longest_prefix(class.as_str(), rest).filter(|s| s != &class);
         }
 
         // Later bindings shadow earlier ones.
@@ -300,6 +301,16 @@ mod tests {
         let uses = r.uses_from(&from, &BTreeSet::new());
         assert!(uses.contains_key(&SymbolId::new("shop.cart.Cart.check")));
         assert!(uses.contains_key(&SymbolId::new("shop.cart.Cart.add")));
+    }
+
+    #[test]
+    fn instance_attributes_are_not_uses_of_the_class() {
+        let r = idx(&[(
+            "m.py",
+            "class L:\n    def __init__(self, p):\n        self.p = p\n    def f(self):\n        return self.p\n",
+        )]);
+        let uses = r.uses_from(&["m.L.f".into()].into(), &BTreeSet::new());
+        assert!(!uses.contains_key(&SymbolId::new("m.L")), "{uses:?}");
     }
 
     #[test]

@@ -19,6 +19,8 @@ COLUMNS = [
     ),
     ("contract", "contract-coupled", lambda r: r["contract_deps"] > 0),
     ("breaking", "breaking-coupled", lambda r: r["breaking_deps"] > 0),
+    ("violating", "call sites violate new contract", lambda r: r.get("violating_deps", 0) > 0),
+    ("violating_clean", "violating, textually clean", lambda r: r.get("violating_deps", 0) > 0 and not r["textual_conflict"]),
     ("breaking_clean", "breaking-coupled, textually clean", lambda r: r["breaking_deps"] > 0 and not r["textual_conflict"]),
     ("contract_clean", "contract-coupled, textually clean", lambda r: r["contract_deps"] > 0 and not r["textual_conflict"]),
 ]

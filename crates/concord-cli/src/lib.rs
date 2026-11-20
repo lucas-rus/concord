@@ -126,7 +126,23 @@ pub fn footprint_and_index(
         })
         .collect();
     let module_level: BTreeSet<String> = new_files.keys().cloned().collect();
-    let uses = index.uses_from(&from, &module_level);
+    let mut uses = index.uses_from(&from, &module_level);
+    // Only use sites the branch wrote or changed are its own risk. A call that
+    // already existed at the base is updated by whoever changes the contract
+    // (and if both edit the same lines, git reports a textual conflict).
+    let existing: BTreeSet<(String, String, String)> = new_files
+        .keys()
+        .filter_map(|p| base_files.get(p))
+        .flat_map(|f| {
+            f.refs
+                .iter()
+                .map(move |r| (f.path.clone(), r.from.0.clone(), r.text.clone()))
+        })
+        .collect();
+    for sites in uses.values_mut() {
+        sites.retain(|s| !existing.contains(&(s.path.clone(), s.from.0.clone(), s.text.clone())));
+    }
+    uses.retain(|_, sites| !sites.is_empty());
 
     Ok((
         BranchFootprint {

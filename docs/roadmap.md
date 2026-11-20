@@ -15,7 +15,8 @@ Aligned with the thesis work plan (defence: summer 2027).
 - [x] Breaking vs. compatible contract changes (structured signatures, `compat::classify`)
 - [x] `eval/rq1/run_rq1.py`: turn every CooperBench feature pair (`feature<N>/feature.patch`) into branches on the task's base commit and run `concord analyze --json` (textual results match CooperBench's gold conflict report)
 - [x] Report on all 560 Python gold pairs ([eval/rq1/results.md](../eval/rq1/results.md)): 24% symbol-disjoint file overlaps, 47% contract-coupled but only 13% breaking, 15 silent breaking couplings
-- [ ] Validate the 15 silent breaking couplings by running both features' tests on the clean merge (CooperBench Docker images)
+- [x] Test-based validation (`validate_pairs.py`): jinja 0/48 interference; precision fixes (attribute resolution, call-site conformance, own call sites only) reduce silent flags from 15 to 1
+- [ ] Validate the remaining dspy candidate inside CooperBench's Docker image
 - [ ] Resolver quality: precision/recall of `RepoIndex` uses against scip-python / basedpyright on the 9 Python repos
 
 ## M2: Live daemon and Claude Code integration ✅ (pulled forward, Nov 2026)

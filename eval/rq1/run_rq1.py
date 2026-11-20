@@ -124,6 +124,7 @@ def pair_rows(repo_name: str, task_id: str, analysis: dict, names: dict[str, int
                 "contract_deps_file_disjoint": 0,
                 "breaking_deps": 0,
                 "breaking_deps_file_disjoint": 0,
+                "violating_deps": 0,
                 "duplicates": 0,
                 "contract_dep_symbols": [],
             },
@@ -153,6 +154,8 @@ def pair_rows(repo_name: str, task_id: str, analysis: dict, names: dict[str, int
             r["contract_deps"] += 1
             if f["file_disjoint"]:
                 r["contract_deps_file_disjoint"] += 1
+            if f.get("violations"):
+                r["violating_deps"] += 1
             if f["breaking"]:
                 r["breaking_deps"] += 1
                 r["breaking_deps_file_disjoint"] += f["file_disjoint"]
@@ -178,6 +181,8 @@ def summarize(rows: list[dict], gold: dict[tuple, bool]) -> dict:
         c["breaking_coupled"] += r["breaking_deps"] > 0
         c["breaking_coupled_file_disjoint"] += r["breaking_deps_file_disjoint"] > 0
         c["breaking_coupled_but_textually_clean"] += r["breaking_deps"] > 0 and not textual
+        c["violating"] += r["violating_deps"] > 0
+        c["violating_but_textually_clean"] += r["violating_deps"] > 0 and not textual
         c["textual_conflict_without_same_symbol"] += textual and r["same_symbol"] == 0
         key = (r["repo"], int(r["task_id"]), r["f1"], r["f2"])
         if key in gold:

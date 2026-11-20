@@ -43,3 +43,42 @@
 - Gold patches are not agent patches. Agents also overlap in ways gold patches do not (duplicated work, divergent architecture).
 - `uses` resolution is a static over-approximation; precision and recall against an LSP oracle are still to be measured.
 - Compatibility is decided syntactically and conservatively. For example, variable annotation changes and unknown decorators count as breaking.
+
+
+## Update 2026-11-20: precision fixes and test-based validation
+
+The first analysis over-reported couplings. Running real tests showed why, and three fixes followed:
+
+1. **Instance attributes are not class uses.** `self.searchpath` used to resolve to the class `FileSystemLoader`, which made every reading method "depend on" the constructor. Only known members are resolved now.
+2. **Call-site conformance.** A coupling is now counted as *violating* only if the consumer's calls really fail the new signature, checked by `compat::check_call` with the same rule the live finish gate uses. Previously any use of a symbol with a breaking change counted.
+3. **Only the consumer's own call sites.** A call that already existed at the base is the producer's responsibility. Producers update such calls in their own branch, and git takes that change unless both sides edited the same lines, in which case it is a textual conflict. Example: jinja task 1559, features 1 and 5.
+
+Re-run on all 560 pairs ([data/gold-pairs-2026-11-20.jsonl](data/gold-pairs-2026-11-20.jsonl)):
+
+| repo | pairs | textual conflict | same symbol edited | file overlap, symbols disjoint | contract-coupled | breaking-coupled | call sites violate new contract | violating, textually clean | breaking-coupled, textually clean | contract-coupled, textually clean |
+|---|---|---|---|---|---|---|---|---|---|---|
+| dottxt_ai_outlines | 79 | 61 (77%) | 32 (41%) | 47 (59%) | 18 (23%) | 6 (8%) | 1 (1%) | 0 (0%) | 0 (0%) | 0 (0%) |
+| dspy | 55 | 38 (69%) | 36 (65%) | 16 (29%) | 12 (22%) | 10 (18%) | 5 (9%) | 1 (2%) | 3 (5%) | 3 (5%) |
+| huggingface_datasets | 26 | 17 (65%) | 20 (77%) | 6 (23%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) |
+| llama_index | 39 | 28 (72%) | 29 (74%) | 10 (26%) | 3 (8%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 1 (3%) |
+| openai_tiktoken | 45 | 45 (100%) | 45 (100%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) |
+| pallets_click | 115 | 95 (83%) | 103 (90%) | 12 (10%) | 13 (11%) | 3 (3%) | 1 (1%) | 0 (0%) | 0 (0%) | 4 (3%) |
+| pallets_jinja | 135 | 71 (53%) | 92 (68%) | 43 (32%) | 19 (14%) | 2 (1%) | 0 (0%) | 0 (0%) | 1 (1%) | 1 (1%) |
+| pillow | 30 | 24 (80%) | 30 (100%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) |
+| samuelcolvin_dirty_equals | 36 | 36 (100%) | 36 (100%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) | 0 (0%) |
+| **all** | 560 | 415 (74%) | 423 (76%) | 134 (24%) | 65 (12%) | 21 (4%) | 7 (1%) | 1 (0%) | 4 (1%) | 9 (2%) |
+
+**Test-based validation** ([validate_pairs.py](validate_pairs.py)). For every textually clean pair, each feature's own tests run on its branch, then both test sets run on the merge:
+
+- **jinja**, 64 clean pairs ([data](data/validation-jinja-2026-11-20.jsonl)):
+  - 48 pairs could be evaluated; in the other 16, the two features' *test patches* conflict with each other.
+  - No pair passes alone but fails together (0/48).
+  - The first analysis flagged 10 of these pairs as breaking; all 10 pass together, i.e. false positives.
+  - After the fixes, no jinja pair is flagged as a silent violation.
+- **dspy:** its tests need a LiteLLM proxy fixture that only CooperBench's Docker images provide, so they could not run here. The single remaining silent violation in the whole dataset (dspy 8587, features 1 and 4: `StreamResponse` gains the required field `is_last_chunk`) is therefore **unverified**.
+
+**What this means**
+- Semantic interference between *gold* feature pairs is rare. This agrees with *Passes Alone, Fails Together*, which found almost none among merged human pull request pairs. Gold patches were written to be combined.
+- The value of Concord on CooperBench should therefore be measured on **agent** patches, where the live runs show the failure mode clearly. The validation also gives the precision baseline for RQ4:
+  - the naive coupling definition would have produced 15 spurious gate blocks on this data;
+  - the conformance-based definition produces at most 1.

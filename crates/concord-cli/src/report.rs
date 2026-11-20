@@ -98,6 +98,7 @@ pub fn analysis(a: &Analysis, sim: Option<&Simulation>) -> String {
                 file_disjoint,
                 breaking,
                 reasons,
+                violations,
                 ..
             } => {
                 let _ = writeln!(
@@ -115,6 +116,9 @@ pub fn analysis(a: &Analysis, sim: Option<&Simulation>) -> String {
                     "             now: {}",
                     after.as_ref().map(|c| c.display.as_str()).unwrap_or("(removed)")
                 );
+                for v in violations {
+                    let _ = writeln!(out, "             VIOLATION {v}");
+                }
                 if !reasons.is_empty() {
                     let _ = writeln!(
                         out,
