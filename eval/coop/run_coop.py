@@ -119,7 +119,7 @@ def main() -> int:
                     "--mode", "enforce" if mode == "peer" else mode, *(["--peer-merge"] if mode == "peer" else []),
                     "--model", args.model, "--budget-usd", args.budget_usd,
                     "--test-cmd", hidden, "--allow", f"Bash({test_cmd_bin} *)", "--allow", f"Bash({test_cmd_bin})",
-                    "--out", str(run_out),
+                    "--out", str(run_out), "--max-wait-secs", "300",
                 ],
                 capture_output=True,
                 text=True,

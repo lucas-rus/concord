@@ -512,6 +512,10 @@ impl Directory {
 
         if let Some(a) = self.agents.get_mut(agent) {
             a.seen.insert(symbol.clone(), version);
+            // The publisher's version supersedes any version it was stale on.
+            // Both agents edited the same definition, so the overlap surfaces
+            // as a textual conflict at merge time (or via peer merge).
+            a.stale.remove(symbol);
         }
         let mut notices = Vec::new();
         for (b, be) in self.agents.iter_mut().filter(|(b, _)| *b != agent) {
@@ -870,6 +874,10 @@ mod tests {
         d.observe_footprint(&b, &[cb], BTreeMap::new());
         assert!(d.finish_gate(&b).blockers.iter().all(|x| !matches!(x, Blocker::Contended { .. })));
         assert_eq!(d.owner(&SymbolId::new(SEND)), Some(&b));
+        // Regression: once B publishes its own version it is not stale on the symbol.
+        d.publish_all(&b);
+        assert!(!d.stale_symbols(&b).contains(&SymbolId::new(SEND)));
+        assert!(d.finish_gate(&b).is_open());
     }
 
     #[test]

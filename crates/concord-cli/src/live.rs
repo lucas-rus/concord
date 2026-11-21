@@ -484,6 +484,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         let producers: BTreeSet<String> = remaining
             .keys()
             .filter_map(|s| st.dir.published_by(s).map(|p| p.0.clone()))
+            .filter(|p| p != agent)
             .collect();
         let unmerged: Vec<String> = producers
             .iter()
