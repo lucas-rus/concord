@@ -84,6 +84,10 @@ enum Command {
         /// How long a finishing agent may wait for producers it depends on.
         #[arg(long, default_value_t = 900)]
         max_wait_secs: u64,
+        /// Finish gate also merges finished peers whose work conflicts textually,
+        /// so the finishing agent resolves the conflict (enforce mode).
+        #[arg(long)]
+        peer_merge: bool,
         /// Rounds of resuming agents that became stale after finishing.
         #[arg(long, default_value_t = 2)]
         resume_rounds: u32,
@@ -175,6 +179,7 @@ fn main() -> Result<()> {
             allow,
             out,
             max_wait_secs,
+            peer_merge,
             resume_rounds,
             claude,
         } => {
@@ -191,6 +196,7 @@ fn main() -> Result<()> {
                 test_cmd,
                 allowed_tools: allow,
                 max_wait: Duration::from_secs(max_wait_secs),
+                peer_merge,
                 resume_rounds,
                 claude,
                 concord_exe: std::env::current_exe()?,

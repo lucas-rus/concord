@@ -258,6 +258,27 @@ impl Repo {
         }
     }
 
+    /// Merge `rev` into the worktree, leaving conflict markers in place for the
+    /// agent to resolve (no abort). Returns the conflicted files.
+    pub fn merge_keep_conflicts(worktree: &Path, rev: &str, message: &str) -> Result<MergeIntoOutcome> {
+        let mut args: Vec<&str> = IDENTITY.to_vec();
+        args.extend(["merge", "--no-ff", "--no-edit", "-m", message, rev]);
+        match run(worktree, &args, None) {
+            Ok(_) => Ok(MergeIntoOutcome {
+                clean: true,
+                conflicted_files: vec![],
+            }),
+            Err(GitError::Command { .. }) => {
+                let files = run(worktree, &["diff", "--name-only", "--diff-filter=U"], None)?;
+                Ok(MergeIntoOutcome {
+                    clean: false,
+                    conflicted_files: files.lines().map(str::to_owned).collect(),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// A commit whose tree is the clean merge of `a` and `b` (parents a, b),
     /// without touching any worktree. `None` if the merge conflicts.
     pub fn virtual_merge(&self, a: &str, b: &str) -> Result<Option<String>> {
@@ -385,6 +406,26 @@ mod tests {
 
         let m = repo.merge_tree("one", "main").unwrap();
         assert!(m.clean);
+    }
+
+    #[test]
+    fn merge_keep_conflicts_leaves_markers() {
+        let (tmp, _repo) = init_repo();
+        let d = tmp.path();
+        sh(d, &["checkout", "-q", "-b", "other"]);
+        fs::write(d.join("a.py"), "def f():\n    return 'other'\n").unwrap();
+        sh(d, &["commit", "-q", "-am", "other"]);
+        sh(d, &["checkout", "-q", "main"]);
+        fs::write(d.join("a.py"), "def f():\n    return 'mine'\n").unwrap();
+        sh(d, &["commit", "-q", "-am", "mine"]);
+        let out = Repo::merge_keep_conflicts(d, "other", "merge").unwrap();
+        assert!(!out.clean);
+        assert_eq!(out.conflicted_files, vec!["a.py".to_string()]);
+        assert!(fs::read_to_string(d.join("a.py")).unwrap().contains("<<<<<<<"));
+        // Resolving and committing concludes the merge.
+        fs::write(d.join("a.py"), "def f():\n    return 'both'\n").unwrap();
+        Repo::commit_all(d, "resolved").unwrap();
+        assert_eq!(sh(d, &["rev-list", "--parents", "-n", "1", "HEAD"]).split_whitespace().count(), 3);
     }
 
     #[test]

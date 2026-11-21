@@ -56,6 +56,9 @@ pub enum Status {
     Finished,
 }
 
+/// Upper bound on finish-gate blocks per agent (liveness guarantee).
+pub const MAX_GATE_BLOCKS: u32 = 6;
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AgentStats {
     pub tool_events: u32,
@@ -79,6 +82,10 @@ pub struct AgentInfo {
     pub merged_producers: BTreeSet<String>,
     pub index: Option<RepoIndex>,
     pub stats: AgentStats,
+    /// Files with conflict markers from a peer merge the agent must resolve.
+    pub pending_conflicts: Vec<String>,
+    /// Peer whose merge is in progress (committed once conflicts are resolved).
+    pub pending_peer: Option<(String, String)>,
 }
 
 struct Snapshot {
@@ -93,6 +100,9 @@ pub struct State {
     pub dir: Directory,
     pub agents: BTreeMap<String, AgentInfo>,
     pub max_wait: Duration,
+    /// Before finishing, merge finished peers whose work conflicts textually
+    /// with the agent's, so the agent resolves the conflicts itself.
+    pub peer_merge: bool,
     revisions: HashMap<String, Arc<Snapshot>>,
     log: Option<std::fs::File>,
     started: Instant,
@@ -119,6 +129,7 @@ impl State {
             dir: Directory::new(),
             agents: BTreeMap::new(),
             max_wait,
+            peer_merge: false,
             revisions: HashMap::new(),
             log,
             started: Instant::now(),
@@ -141,6 +152,8 @@ impl State {
                 merged_producers: BTreeSet::new(),
                 index: None,
                 stats: AgentStats::default(),
+                pending_conflicts: Vec::new(),
+                pending_peer: None,
             },
         );
     }
@@ -444,9 +457,24 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
 
     loop {
         let mut st = shared.lock().expect("state");
+        // Liveness: Concord never holds an agent forever. After MAX_GATE_BLOCKS
+        // blocks the agent may finish; the integration check reports the rest.
+        if st.agents.get(agent).is_some_and(|a| a.stats.gate_blocks >= MAX_GATE_BLOCKS) {
+            st.log("stop", json!({ "agent": agent, "decision": "allow", "reason": "block_limit" }));
+            finish(&mut st, agent);
+            return (String::new(), 0);
+        }
         let remaining = st.auto_ack(agent);
         let gate = st.dir.finish_gate(&AgentId::new(agent));
         if remaining.is_empty() && gate.is_open() {
+            if st.peer_merge
+                && let Some(reason) = integrate_peers(&mut st, agent)
+            {
+                if let Some(a) = st.agents.get_mut(agent) {
+                    a.stats.gate_blocks += 1;
+                }
+                return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+            }
             st.log("stop", json!({ "agent": agent, "decision": "allow" }));
             finish(&mut st, agent);
             return (String::new(), 0);
@@ -582,6 +610,25 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             reason.push_str(&merge_notes.join(" "));
             reason.push(' ');
         }
+        if remaining.is_empty() {
+            // Gated only by contention: say so concretely.
+            let gate = st.dir.finish_gate(&AgentId::new(agent));
+            reason.push_str("You are changing the contract of symbols another agent is also changing:\n");
+            for b in &gate.blockers {
+                if let concord_core::Blocker::Contended { symbol, owner } = b {
+                    let who = owner.as_ref().map(|o| o.0.as_str()).unwrap_or("another agent");
+                    reason.push_str(&format!("  {symbol} (lease held by {who})\n"));
+                }
+            }
+            reason.push_str(
+                "Keep its existing signature working (add new parameters as optional), then finish again.",
+            );
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.stats.gate_blocks += 1;
+            }
+            st.log("stop", json!({ "agent": agent, "decision": "block", "reason": "contended" }));
+            return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+        }
         reason.push_str(
             "Another agent changed a contract your code depends on, and your code does not conform to it yet.\n",
         );
@@ -604,6 +651,121 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         st.log("stop", json!({ "agent": agent, "decision": "block", "reason": "non_conforming", "symbols": remaining.keys().collect::<Vec<_>>() }));
         return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
     }
+}
+
+fn has_markers(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|t| {
+            t.lines()
+                .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> ") || l == "=======")
+        })
+        .unwrap_or(false)
+}
+
+/// Peer integration step of the finish gate. Returns a block reason, or None
+/// if the agent may finish.
+fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
+    let wt = st.agents[agent].worktree.clone();
+
+    // 1. A peer merge is in progress: wait until all markers are gone, then commit it.
+    if let Some((peer, head)) = st.agents[agent].pending_peer.clone() {
+        let unresolved: Vec<String> = st.agents[agent]
+            .pending_conflicts
+            .iter()
+            .filter(|f| has_markers(&wt.join(f)))
+            .cloned()
+            .collect();
+        if !unresolved.is_empty() {
+            st.log(
+                "stop",
+                json!({ "agent": agent, "decision": "block", "reason": "unresolved_conflicts" }),
+            );
+            return Some(format!(
+                "[concord] The merge of agent `{peer}`'s work still has unresolved conflict markers in: {}. \
+                 Resolve them so that both your feature and theirs work, run the tests, then finish.",
+                unresolved.join(", ")
+            ));
+        }
+        if let Err(e) = Repo::commit_all(&wt, &format!("concord: merge {peer} into {agent} (conflicts resolved)")) {
+            st.log("error", json!({ "agent": agent, "error": e.to_string() }));
+        }
+        let base = st.agents[agent].base.clone();
+        let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head);
+        if let Some(a) = st.agents.get_mut(agent) {
+            a.base = new_base;
+            a.pending_conflicts.clear();
+            a.pending_peer = None;
+        }
+        st.log("peer_merge_resolved", json!({ "agent": agent, "peer": peer }));
+        let _ = st.refresh(agent);
+    }
+
+    // 2. Find a finished peer whose work conflicts textually with ours.
+    let me = match Repo::snapshot_worktree(&wt) {
+        Ok(c) => c,
+        Err(e) => {
+            st.log("error", json!({ "agent": agent, "error": e.to_string() }));
+            return None;
+        }
+    };
+    let peers: Vec<(String, PathBuf, String)> = st
+        .agents
+        .values()
+        .filter(|p| p.name != agent && p.status == Status::Finished)
+        .filter(|p| !st.agents[agent].merged_producers.contains(&p.name))
+        .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
+        .collect();
+    for (peer, p_wt, p_branch) in peers {
+        let _ = Repo::commit_all(&p_wt, &format!("agent {peer}: work committed by concord for merging"));
+        let Ok(head) = st.repo.rev_parse(&p_branch) else {
+            continue;
+        };
+        let Ok(m) = st.repo.merge_tree(&me, &head) else {
+            continue;
+        };
+        if m.clean {
+            continue;
+        }
+        let _ = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {peer}"));
+        match Repo::merge_keep_conflicts(&wt, &head, &format!("concord: merge {peer} into {agent}")) {
+            Ok(out) => {
+                if let Some(a) = st.agents.get_mut(agent) {
+                    a.merged_producers.insert(peer.clone());
+                    a.stats.merges.push(peer.clone());
+                }
+                st.log(
+                    "peer_merge",
+                    json!({ "agent": agent, "peer": peer, "clean": out.clean, "files": out.conflicted_files }),
+                );
+                if out.clean {
+                    // merge-tree saw a conflict that git merge resolved (e.g. rename detection).
+                    let base = st.agents[agent].base.clone();
+                    let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head);
+                    if let Some(a) = st.agents.get_mut(agent) {
+                        a.base = new_base;
+                    }
+                    let _ = st.refresh(agent);
+                    return Some(format!(
+                        "[concord] Concord merged agent `{peer}`'s finished work into your worktree. Run the \
+                         tests on the merged code and fix anything that broke, then finish."
+                    ));
+                }
+                if let Some(a) = st.agents.get_mut(agent) {
+                    a.pending_conflicts = out.conflicted_files.clone();
+                    a.pending_peer = Some((peer.clone(), head));
+                }
+                return Some(format!(
+                    "[concord] Agent `{peer}` finished work that conflicts with yours in: {}. Concord has merged \
+                     their work into your worktree; the files now contain git conflict markers (<<<<<<<, =======, \
+                     >>>>>>>). Edit these files so that both your feature and theirs are kept and work together \
+                     (remove all markers), run the tests, then finish. Do not discard their changes.",
+                    out.conflicted_files.join(", ")
+                ));
+            }
+            Err(e) => st.log("error", json!({ "agent": agent, "error": e.to_string() })),
+        }
+    }
+    None
 }
 
 /// Serve hook requests on `listener` until the process exits.

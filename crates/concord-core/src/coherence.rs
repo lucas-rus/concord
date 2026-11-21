@@ -423,10 +423,12 @@ impl Directory {
                     // Already published exactly this contract: nothing new to announce.
                     entry.owner = Some(agent.clone());
                     entry.pending = None;
+                    self.agents.get_mut(agent).unwrap().contended.remove(&c.symbol);
                 }
                 _ => {
                     let first = entry.owner.is_none();
                     entry.owner = Some(agent.clone());
+                    self.agents.get_mut(agent).unwrap().contended.remove(&c.symbol);
                     let breaking = c.is_breaking();
                     entry.pending = Some(Pending {
                         before: entry.current_contract(),
@@ -584,11 +586,18 @@ impl Directory {
 
     /// Release all leases held by the agent (after it finished or was stopped).
     pub fn release(&mut self, agent: &AgentId) {
-        for e in self.symbols.values_mut() {
+        let mut freed = BTreeSet::new();
+        for (s, e) in self.symbols.iter_mut() {
             if e.owner.as_ref() == Some(agent) {
                 e.owner = None;
                 e.pending = None;
+                freed.insert(s.clone());
             }
+        }
+        // Contention on a released lease is over; the waiting agent takes the
+        // lease on its next observation and is stale on the published version.
+        for a in self.agents.values_mut() {
+            a.contended.retain(|s| !freed.contains(s));
         }
     }
 
@@ -837,6 +846,30 @@ mod tests {
         assert_eq!(d.owner(&SymbolId::new(SEND)), Some(&a));
         d.observe_footprint(&a, &[], BTreeMap::new());
         assert_eq!(d.owner(&SymbolId::new(SEND)), None);
+    }
+
+    /// Regression (CooperBench pilot): after the lease owner finishes, the
+    /// contending agent must not stay gated on a lease nobody holds.
+    #[test]
+    fn contention_ends_when_the_owner_releases() {
+        let (a, b) = (AgentId::new("A"), AgentId::new("B"));
+        let mut d = Directory::new();
+        let ca = change(SEND, ChangeKind::ContractChanged, Some("def send_email(to, body)"), Some("def send_email(to, body, ctx)"));
+        let cb = change(SEND, ChangeKind::ContractChanged, Some("def send_email(to, body)"), Some("def send_email(to, body, *, html)"));
+        d.observe_footprint(&a, std::slice::from_ref(&ca), BTreeMap::new());
+        let n = d.observe_footprint(&b, std::slice::from_ref(&cb), BTreeMap::new());
+        assert!(matches!(n[0].kind, NoticeKind::LeaseHeld { .. }));
+        assert!(!d.finish_gate(&b).is_open());
+        d.publish_all(&a);
+        d.release(&a);
+        assert!(
+            d.finish_gate(&b).blockers.iter().all(|x| !matches!(x, Blocker::Contended { .. })),
+            "release ends contention"
+        );
+        // B's next observation takes the lease; it is still contended-free.
+        d.observe_footprint(&b, &[cb], BTreeMap::new());
+        assert!(d.finish_gate(&b).blockers.iter().all(|x| !matches!(x, Blocker::Contended { .. })));
+        assert_eq!(d.owner(&SymbolId::new(SEND)), Some(&b));
     }
 
     #[test]
