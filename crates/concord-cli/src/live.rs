@@ -313,6 +313,19 @@ impl State {
         let id = AgentId::new(agent);
         let mut remaining = BTreeMap::new();
         for s in self.dir.stale_symbols(&id) {
+            // The producer already merged this agent's work, so its contract is
+            // built on ours: adapting is the producer's job, not ours. (Resuming
+            // the agent here would make it diverge from what the producer merged.)
+            let subsumed = self
+                .dir
+                .published_by(&s)
+                .and_then(|p| self.agents.get(&p.0))
+                .is_some_and(|p| p.merged_producers.contains(agent));
+            if subsumed {
+                self.dir.acknowledge(&id, &s);
+                self.log("ack", json!({ "agent": agent, "symbol": s, "subsumed": true }));
+                continue;
+            }
             let problems = self.conformance(agent, &s);
             let producer_merged = self
                 .dir

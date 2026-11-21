@@ -4,8 +4,8 @@
 For each selected pair (repo, task, f1, f2), two agents start from the task's
 base commit, each receiving its feature description (`feature.md`) as the
 prompt. They run in parallel git worktrees, with or without Concord (`--modes`).
-Afterwards their branches are merged, and both features' hidden tests
-(`tests.patch`) are run on the merged code. This is CooperBench's success
+Afterwards their branches are merged, and each feature's hidden tests
+(`tests.patch`) are run, separately, on the merged code. This is CooperBench's success
 criterion.
 
 Deviation from the official harness (to be disclosed): the agents run locally
@@ -46,18 +46,6 @@ def wrapper(cache: Path, repo: Path, py: Path) -> Path:
     return w
 
 
-def tests_apply_together(repo: Path, base: str, t1: Path, t2: Path, scratch: Path) -> bool:
-    if scratch.exists():
-        git(["worktree", "remove", "--force", str(scratch)], cwd=repo, check=False)
-    git(["worktree", "add", "-q", "--detach", str(scratch), base], cwd=repo)
-    ok = all(
-        git(["apply", "--whitespace=nowarn", str(t.resolve())], cwd=scratch, check=False).returncode == 0
-        for t in (t1, t2)
-    )
-    git(["worktree", "remove", "--force", str(scratch)], cwd=repo, check=False)
-    return ok
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cooperbench", required=True, type=Path)
@@ -83,20 +71,23 @@ def main() -> int:
         install(py, repo)
         test_cmd_bin = wrapper(args.cache, repo, py)
         t1, t2 = task / f"feature{f1}" / "tests.patch", task / f"feature{f2}" / "tests.patch"
-        if not tests_apply_together(repo, base, t1, t2, args.cache / f"{repo.name}-check"):
-            print(f"{spec}: hidden test patches conflict with each other; skipped", file=sys.stderr)
-            continue
-        files = " ".join(test_files(t1) + test_files(t2))
+        # Each feature's hidden tests run separately on the merged code (as in
+        # CooperBench), so test patches that conflict with each other are fine.
         # Agents may have edited or created the hidden test files themselves;
-        # as in CooperBench, reset them to the base revision before applying.
+        # reset them to the base revision before applying each patch.
+        all_files = sorted(set(test_files(t1) + test_files(t2)))
         reset = " ".join(
             f"{{ git cat-file -e {base}:{f} 2>/dev/null && git checkout -q {base} -- {f} || rm -f {f}; }};"
-            for f in files.split()
+            for f in all_files
         )
-        hidden = (
-            f"{reset} git apply --whitespace=nowarn {t1.resolve()} && git apply --whitespace=nowarn {t2.resolve()} && "
-            f"{test_cmd_bin} -q {files}"
-        )
+        steps = []
+        for i, t in ((1, t1), (2, t2)):
+            steps.append(
+                f'{reset} echo "== feature {i} =="; '
+                f"if git apply --whitespace=nowarn {t.resolve()}; then {test_cmd_bin} -q --tb=line {' '.join(test_files(t))}; "
+                f'r{i}=$?; else echo "tests.patch does not apply"; r{i}=1; fi; echo "feature {i} rc=$r{i}";'
+            )
+        hidden = " ".join(steps) + f' {reset} echo "HIDDEN f1=$r1 f2=$r2"; test "$r1" = 0 && test "$r2" = 0'
         tasks = []
         for f in (f1, f2):
             desc = (task / f"feature{f}" / "feature.md").read_text()
@@ -129,6 +120,7 @@ def main() -> int:
                 print(f"  concord run failed: {r.stderr.strip()[-400:]}", file=sys.stderr)
                 continue
             rep = json.loads(reports[-1].read_text())
+            hm = re.search(r"HIDDEN f1=(\d+) f2=(\d+)", rep["integration"]["tests_output_tail"])
             row = {
                 "pair": spec,
                 "mode": mode,
@@ -139,6 +131,8 @@ def main() -> int:
                 "gate_blocks": sum(a["gate_blocks"] for a in rep["agents"]),
                 "notices": sum(a["notices_delivered"] for a in rep["agents"]),
                 "merges": sum(len(a["merges"]) for a in rep["agents"]),
+                "f1_pass": bool(hm) and hm.group(1) == "0",
+                "f2_pass": bool(hm) and hm.group(2) == "0",
                 "tail": rep["integration"]["tests_output_tail"].splitlines()[-1:] if rep["integration"]["tests_output_tail"] else [],
             }
             print(f"  -> success={row['success']} conflict={row['merge_conflict']} cost=${row['cost_usd']:.3f}", file=sys.stderr)
