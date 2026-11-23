@@ -85,4 +85,5 @@ Each fix below came from a failure observed with real agents (Haiku), and has a 
 
 Contract-layer fixes found on the same runs (full Concord, 513 notices):
 - `re.match(...)` was resolved to the repository's unique `InlineParser.match`. A receiver bound by an import that does not resolve in the repository is now never matched by name.
-- Agents were blocked on pre-existing call sites (in their base) of a symbol another agent removed. Conformance now covers only call sites the agent wrote; existing callers are the changing agent's job (as in any refactoring).
+- Pre-existing call sites were already excluded from an agent's obligations, but only when file, enclosing symbol and text matched the base exactly. They are now also excluded when the same text exists anywhere in the base file (a moved or re-indented call).
+- Correction to the first diagnosis: in that run only 5 gate blocks were for non-conforming call sites (html-blocks: the `re.match` false positive; images-autolinks). lists and code-blocks were held by waits for still-running producers (3 times each) and then let through at the block limit. The 450 contract-breaking notices came from 234 distinct (agent, symbol) pairs, mostly many tickets extending `HtmlRenderer`; they were batched into 41 deliveries.

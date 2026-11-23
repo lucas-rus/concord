@@ -271,3 +271,62 @@ fn yielder_waits_for_the_hand_off_even_after_restoring() {
     );
     assert_eq!(stop(&shared, "yielder"), None);
 }
+
+/// Contract obligations cover only the call sites an agent wrote: a consumer
+/// that touched a function containing a pre-existing call is not blocked on
+/// it when another agent changes the callee's signature (guards the base-ref
+/// exclusion in `footprint_and_index` and its text fallback in `conformance`).
+#[test]
+fn pre_existing_call_sites_are_not_the_consumers_obligation() {
+    const BASE3: &str = "def g(x):\n    return x\n\n\ndef a():\n    v = 1\n    return g(v)\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE3).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let log = tmp.path().join("events.jsonl");
+    let st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        Some(&log),
+        Duration::from_millis(500),
+    )
+    .unwrap();
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let mut wts = Vec::new();
+    for name in ["producer", "consumer"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        shared
+            .lock()
+            .unwrap()
+            .add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let (producer_wt, consumer_wt) = (&wts[0], &wts[1]);
+    // The consumer edits `a` (not its call) and reads the module.
+    edit(&shared, "consumer", consumer_wt, &BASE3.replace("v = 1", "v = 2"));
+    read(&shared, "consumer", consumer_wt);
+    // The producer gives `g` a required parameter and finishes.
+    edit(
+        &shared,
+        "producer",
+        producer_wt,
+        &BASE3.replace("def g(x):", "def g(x, y):"),
+    );
+    assert_eq!(stop(&shared, "producer"), None);
+    // The consumer receives the producer's work, is asked to verify once, and
+    // may then finish: `g(v)` was already there, it is not the consumer's.
+    let mut blocks = 0;
+    while let Some(reason) = stop(&shared, "consumer") {
+        assert!(!reason.contains("does not conform"), "{reason}");
+        blocks += 1;
+        assert!(blocks < 3, "{reason}");
+    }
+    assert!(fs::read_to_string(&log).unwrap().contains("\"ack\""));
+}
