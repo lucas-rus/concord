@@ -229,6 +229,7 @@ fn spawn_agent(
     );
     let child = Command::new(&cfg.claude)
         .current_dir(worktree)
+        .env("PWD", worktree)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&out)?)
@@ -383,6 +384,10 @@ impl OpencodeJob {
         };
         let mut cmd = Command::new(&self.exe);
         cmd.current_dir(&self.worktree)
+            // OpenCode takes its project directory from $PWD, which
+            // current_dir() does not update: without this the agent works in
+            // the directory `concord run` was started from.
+            .env("PWD", &self.worktree)
             .env("OPENCODE_CONFIG_DIR", &self.cfg_dir)
             .args(["run", "--standalone", "--auto", "--format", "json", "-m", &self.model]);
         if let Some(s) = session {
