@@ -1,0 +1,412 @@
+CONCORD - BIBLIOGRAPHY, PAPER LINKS AND REPOSITORIES
+=====================================================
+
+Every source cited in the thesis proposal ("Concord: Contract-Level Coherence for
+Parallel AI Coding Agents"), with:
+  - where to get the PDF (or the page, for software and documentation),
+  - the source code repository, where one exists,
+  - a note on how it helps Concord.
+
+The PDFs themselves are not stored in this repository: most of them are not
+licensed for redistribution. The BibTeX entries are in references.bib next to
+this file.
+
+Links checked on 2026-11-23:
+  - arXiv and SBES PDF links: downloadable directly.
+  - DOI links: open the publisher's page (ACM, IEEE, Elsevier, Springer). If the
+    PDF there is paywalled, it is reachable through the university library (UVT)
+    or the authors' home pages.
+  - GitHub links: verified to exist through the GitHub API.
+Many 2026 items are arXiv preprints and are not yet peer-reviewed.
+
+
+1. EVIDENCE THAT PARALLEL CODING AGENTS INTERFERE (the problem)
+--------------------------------------------------------------
+
+[ogenrwot2026agenticflict]
+  D. Ogenrwot, J. Businge. AgenticFlict: A Large-Scale Dataset of Merge Conflicts
+  in AI Coding Agent Pull Requests. AIware 2026.
+  PDF:  https://arxiv.org/pdf/2604.03551
+  Why:  The headline motivation. Replaying 107K+ agent PRs shows that 27.67% have
+        textual merge conflicts. It establishes that agent concurrency conflicts
+        are frequent, and it only measures textual ones, which is the gap Concord
+        addresses at the contract level.
+
+[xu2026agentprs]
+  G. Xu, A. Subramanian, N. Karthik. AI Agent Pull Requests on GitHub: Frequency,
+  Structure, and Merge Conflict Risk. 2026.
+  PDF:  https://arxiv.org/pdf/2607.04697
+  Why:  Shows the conflict risk grows when agents work concurrently:
+          - 40.2% of repositories have concurrently open agent PR pairs;
+          - the conflict rate is 41.7% for different agents vs. 19.8% for the same
+            agent;
+          - 84.4% of conflicted files are source code.
+        Supports the claim that coordination must happen at the code level.
+
+[campos2026merge]
+  H. de Souza Campos Junior, L. G. P. Murta. How AI Coding Agents Resolve Merge
+  Conflicts: An Empirical Study. SBES 2026.
+  PDF:  https://cbsoft.sbc.org.br/2026/data/papers/sbes/How%20AI%20Coding%20Agents%20Resolve%20Merge%20Conflicts%20An%20Empirical%20Study.pdf
+  Why:  Humans still author 96.1% of the conflicting merge commits in AI-authored
+        PRs, so today conflict resolution falls back to people. Concord's goal is to
+        prevent or resolve these conflicts while the agents are still working.
+
+[khatua2026cooperbench]
+  A. Khatua et al. CooperBench: Why Coding Agents Cannot be Your Teammates Yet. 2026.
+  PDF:  https://arxiv.org/pdf/2601.13295
+  Code: https://github.com/cooperbench/CooperBench
+  Why:  Concord's main benchmark: 652 two-feature tasks.
+          - It quantifies the "curse of coordination": cooperating agents keep
+            only 0.59 of solo performance.
+          - Free-form messaging does not help, which motivates structured,
+            verifiable notices instead of chat.
+        Concord uses its dataset for two evaluations:
+          - RQ1: gold patches, eval/rq1;
+          - the live agent experiments: eval/coop.
+
+[xia2026passes]
+  H. Xia, E. Wu, Y. Park. Passes Alone, Fails Together: Benchmarking Semantic
+  Coordination in Parallel LLM Agents. 2026.
+  PDF:  https://arxiv.org/pdf/2609.25396
+  Why:  Shows semantic interference after a clean merge, and that a message
+        describing the concurrent change recovers 82% of it. This is the direct
+        justification for Concord's contract-change notices. It is a benchmark
+        only and proposes no mitigation; Concord is one.
+
+[hassan2025sase]
+  A. E. Hassan et al. Agentic Software Engineering: Foundational Pillars and a
+  Research Roadmap. 2025.
+  PDF:  https://arxiv.org/pdf/2509.06216
+  Why:  Frames the field (SE 3.0, structured agentic software engineering) and
+        names multi-agent coordination as an open research pillar. This is where
+        the thesis positions itself.
+
+[li2025aidev]
+  H. Li, H. Zhang, A. E. Hassan. The Rise of AI Teammates in Software Engineering
+  (SE) 3.0: How Autonomous Coding Agents Are Reshaping Software Engineering. 2025.
+  PDF:  https://arxiv.org/pdf/2507.15003
+  Why:  Large-scale evidence (the AIDev dataset) that autonomous agents already
+        author many real pull requests. This motivates why coordinating several
+        of them matters in practice.
+
+
+2. COORDINATION MECHANISMS FOR CONCURRENT CODING AGENTS (closest research)
+------------------------------------------------------------------------
+
+[pugachev2025codecrdt]
+  S. Pugachev. CodeCRDT: Observation-Driven Coordination for Multi-Agent LLM Code
+  Generation. 2025.
+  PDF:  https://arxiv.org/pdf/2510.18893
+  Why:  Agents share character-level CRDT state and observe each other. Concord
+        borrows the idea of observing instead of declaring. The paper reports
+        5-10% semantic conflicts that the CRDT cannot prevent; Concord targets
+        them with symbol contracts.
+
+[cho2026agentroom]
+  S. Cho, D. Lee. AgentRoom: Concurrent Multi-Agent Coding in a CRDT-Backed Shared
+  Workspace. 2026.
+  PDF:  https://arxiv.org/pdf/2608.23740
+  Why:  File-level claims exposed as MCP tools. A baseline for Concord's
+        symbol-level (rather than file-level) granularity.
+
+[sarkar2026grite]
+  D. Sarkar. Before the Pull Request: Mining Multi-Agent Coordination. 2026.
+  PDF:  https://arxiv.org/pdf/2606.19616
+  Why:  A signed claim log stored in git removes duplicate work, but claims are at
+        the task level. Contrasts with Concord's automatic code-level leases.
+
+[huang2026atm]
+  E. Huang. ATM: CID-Brokered Pre-Write Admission for Multi-Agent Code
+  Co-Synthesis. 2026.
+  PDF:  https://arxiv.org/pdf/2607.00041
+  Why:  Pre-write admission based on declared change intents. A comparison point
+        for Concord's observed (not declared) footprints.
+
+[nikolaev2026claimplane]
+  M. Nikolaev. Claim Plane: Reliability Gains and the Limits of Selective
+  Concurrency for Parallel Coding Agents. 2026.
+  PDF:  https://arxiv.org/pdf/2608.00947
+  Code: https://github.com/SkeinRank/claim-plane
+  Why:  The most direct competitor, and it also runs on CooperBench pairs.
+          - It doubles pair pass rate (23.3% -> 50.0%), but serialises 96.7% of
+            executions.
+          - Its declarations under-cover what agents really touch.
+        Concord's thesis is to keep agents parallel and observe footprints
+        automatically; Claim Plane is the baseline to beat.
+
+[lyu2026coagent]
+  H. Lyu, D. Zhang, M. Wu, X. Wei, H. Chen. CoAgent: Concurrency Control for
+  Multi-Agent Systems. 2026.
+  PDF:  https://arxiv.org/pdf/2606.15376
+  Why:  Applies database concurrency control (trajectory pre-order, speculative
+        writes) to agents, but at file/directory granularity and with declared
+        footprints. Concord applies the same family of ideas to code symbols.
+
+[khan2026sbus]
+  S. Khan. S-Bus: Automatic Read-Set Reconstruction for Multi-Agent LLM State
+  Coordination. 2026.
+  PDF:  https://arxiv.org/pdf/2605.17076
+  Why:  Shows agents' self-reported read sets overstate their real usage by
+        32-49%, so read sets should be reconstructed from observation. This
+        supports Concord's design of deriving reads and uses from tool calls and
+        code analysis instead of asking agents.
+
+[parakhin2026token]
+  V. Parakhin. Token Coherence: Adapting MESI Cache Protocols to Minimize
+  Synchronization Overhead in Multi-Agent LLM Systems. 2026.
+  PDF:  https://arxiv.org/pdf/2603.15183
+  Why:  Also maps MESI cache coherence onto agents, but on generic shared
+        artifacts and in simulation only. Concord implements a MESI-like protocol
+        on real code symbols, with real agents.
+
+[yang2026cocoder]
+  X. Yang et al. When Parallelism Pays Off: Cohesion-Aware Task Partitioning for
+  Multi-Agent Coding. 2026.
+  PDF:  https://arxiv.org/pdf/2606.00953
+  Why:  Avoids conflicts by partitioning tasks up front with a static dependency
+        graph. Complementary to Concord, which handles the dependencies that only
+        appear while agents work.
+
+
+3. AGENTS AND BENCHMARKS (background)
+------------------------------------
+
+[jimenez2024swebench]
+  C. E. Jimenez et al. SWE-bench: Can Language Models Resolve Real-World GitHub
+  Issues? ICLR 2024.
+  PDF:  https://arxiv.org/pdf/2310.06770
+  Code: https://github.com/SWE-bench/SWE-bench
+  Why:  The standard single-agent benchmark. CooperBench and Concord's evaluation
+        follow its "hidden tests decide success" protocol.
+
+[yang2024sweagent]
+  J. Yang et al. SWE-agent: Agent-Computer Interfaces Enable Automated Software
+  Engineering. NeurIPS 2024.
+  PDF:  https://arxiv.org/pdf/2405.15793
+  Code: https://github.com/SWE-agent/SWE-agent
+  Why:  Shows the agent-computer interface shapes agent performance. Concord's
+        notices are injected through that interface (tool results, hooks), not
+        through a separate chat channel.
+
+[wang2025openhands]
+  X. Wang et al. OpenHands: An Open Platform for AI Software Developers as
+  Generalist Agents. ICLR 2025.
+  PDF:  https://arxiv.org/pdf/2407.16741
+  Code: https://github.com/OpenHands/OpenHands
+        https://github.com/OpenHands/software-agent-sdk
+  Why:  The agent platform used by CooperBench's official harness. It is a
+        candidate second agent runtime for Concord, e.g. with open models such as
+        Nemotron.
+
+[xia2024agentless]
+  C. S. Xia, Y. Deng, S. Dunn, L. Zhang. Agentless: Demystifying LLM-based Software
+  Engineering Agents. 2024.
+  PDF:  https://arxiv.org/pdf/2407.01489
+  Code: https://github.com/OpenAutoCoder/Agentless
+  Why:  A reminder that simple, structured pipelines can beat free-form agents.
+        Concord's notices are structured and verifiable for the same reason.
+
+[hong2024metagpt]
+  S. Hong et al. MetaGPT: Meta Programming for a Multi-Agent Collaborative
+  Framework. ICLR 2024.
+  PDF:  https://arxiv.org/pdf/2308.00352
+  Code: https://github.com/FoundationAgents/MetaGPT
+  Why:  Role-based multi-agent software development that coordinates through
+        documents and roles, not code. Concord coordinates at the code level
+        instead.
+
+[qian2024chatdev]
+  C. Qian et al. ChatDev: Communicative Agents for Software Development. ACL 2024.
+  PDF:  https://arxiv.org/pdf/2307.07924
+  Code: https://github.com/OpenBMB/ChatDev
+  Why:  Multi-agent development by conversation. CooperBench shows free-form
+        communication alone is not enough, and Concord replaces it with
+        protocol-driven notices.
+
+
+4. FOUNDATIONS: CONFLICT DETECTION AND MERGING (software engineering)
+--------------------------------------------------------------------
+
+[brun2011crystal]
+  Y. Brun, R. Holmes, M. D. Ernst, D. Notkin. Proactive Detection of Collaboration
+  Conflicts. ESEC/FSE 2011.
+  PDF:  https://doi.org/10.1145/2025113.2025139
+  Why:  Crystal speculatively merges developers' work and builds/tests it to find
+        conflicts early. Concord's finish gate and virtual merges
+        (git merge-tree) apply this idea to agents, continuously.
+
+[sarma2012palantir]
+  A. Sarma, D. F. Redmiles, A. van der Hoek. Palantir: Early Detection of
+  Development Conflicts Arising from Parallel Code Changes. IEEE TSE 2012.
+  PDF:  https://doi.org/10.1109/TSE.2011.64
+  Why:  Workspace awareness and the distinction between direct and indirect
+        conflicts. Concord's "contract dependency" findings are indirect conflicts
+        in Palantir's sense.
+
+[guimaraes2012wecode]
+  M. L. Guimaraes, A. R. Silva. Improving Early Detection of Software Merge
+  Conflicts. ICSE 2012.
+  PDF:  https://doi.org/10.1109/ICSE.2012.6227180
+  Why:  Continuous merging of uncommitted changes to detect conflicts early.
+        Concord snapshots each agent's uncommitted worktree after every tool call
+        in the same spirit.
+
+[apel2011semistructured]
+  S. Apel et al. Semistructured Merge: Rethinking Merge in Revision Control
+  Systems. ESEC/FSE 2011.
+  PDF:  https://doi.org/10.1145/2025113.2025141
+  Why:  Merging by program structure instead of lines. This is the basis for
+        Concord's finding that many textual conflicts are symbol-disjoint (24% in
+        RQ1) and could be merged structurally.
+
+[dasilva2024sam]
+  L. Da Silva, P. Borba et al. Detecting Semantic Conflicts with Unit Tests.
+  Journal of Systems and Software, 2024.
+  PDF:  https://doi.org/10.1016/j.jss.2024.112070
+  Why:  Semantic conflicts detected by running tests. Concord's validation of its
+        flags against the CooperBench hidden tests
+        (eval/rq1/validate_pairs.py) follows this approach.
+
+
+5. FOUNDATIONS: CONCURRENCY CONTROL AND COHERENCE (systems)
+----------------------------------------------------------
+
+[kung1981occ]
+  H. T. Kung, J. T. Robinson. On Optimistic Methods for Concurrency Control.
+  ACM TODS 1981.
+  PDF:  https://doi.org/10.1145/319566.319567
+  Why:  Concord is optimistic: agents work freely and are validated at the finish
+        gate, like OCC's validation phase.
+
+[gray1989leases]
+  C. G. Gray, D. R. Cheriton. Leases: An Efficient Fault-Tolerant Mechanism for
+  Distributed File Cache Consistency. SOSP 1989.
+  PDF:  https://doi.org/10.1145/74850.74870
+  Why:  Concord's leases on symbol contracts:
+          - the first agent to change a contract owns it;
+          - the lease is released when the agent finishes.
+
+[papamarcos1984mesi]
+  M. S. Papamarcos, J. H. Patel. A Low-Overhead Coherence Solution for
+  Multiprocessors with Private Cache Memories. ISCA 1984.
+  PDF:  https://doi.org/10.1145/800015.808204
+  Why:  The MESI protocol. Concord's coherence directory maps it onto code:
+          - private worktrees are the caches;
+          - symbol contracts are the cache lines;
+          - contract changes invalidate dependent agents.
+
+[shapiro2011crdt]
+  M. Shapiro, N. Preguica, C. Baquero, M. Zawirski. Conflict-Free Replicated Data
+  Types. SSS 2011.
+  PDF:  https://doi.org/10.1007/978-3-642-24550-3_29
+  Why:  The theory behind CodeCRDT and AgentRoom. It explains why
+        character-level convergence does not imply semantic correctness, which is
+        the gap Concord fills.
+
+
+6. TOOLS, DOCUMENTATION AND REPOSITORIES (practice)
+--------------------------------------------------
+
+[ccagentteams] Claude Code agent teams (documentation)
+  Page: https://code.claude.com/docs/en/agent-teams
+  Code: https://github.com/anthropics/claude-code
+  Why:  The state of practice. The docs tell users to split work so that each
+        teammate owns different files, i.e. there is no code-level coordination.
+        Concord adds that coordination.
+
+[cchooks] Claude Code hooks reference (documentation)
+  Page: https://code.claude.com/docs/en/hooks
+  Why:  Concord's integration surface:
+          - PostToolUse delivers notices via additionalContext;
+          - the Stop hook implements the finish gate.
+        `concord run` launches Claude Code agents with these hooks.
+
+[mcp] Model Context Protocol specification
+  Page: https://modelcontextprotocol.io
+  Code: https://github.com/modelcontextprotocol/modelcontextprotocol
+  Why:  The standard way to expose tools to agents. A possible
+        agent-independent interface for Concord (AgentRoom uses it for its
+        claims).
+
+[gastown] Gas Town: multi-agent orchestrator for coding agents
+  Code: https://github.com/gastownhall/gastown
+        (moved from github.com/steveyegge/gastown, the address in the proposal)
+  Why:  An agent "factory" with a Bors-style bisecting merge queue. It is the
+        model for Concord's integration step, but it detects problems only at
+        merge time.
+
+[clash] Clash: avoid merge conflicts across git worktrees for parallel AI coding agents
+  Code: https://github.com/clash-sh/clash
+  Why:  Pairwise git merge-tree checks between worktrees, in Rust. Shows the
+        technique Concord also uses, but it is file-level and textual only.
+
+[grove] Grove: cross-worktree conflict intelligence for git
+  Code: https://github.com/NathanDrake2406/grove
+  Why:  The closest prior tool: overlap scores at file, hunk, symbol and import
+        level. However, it is passive:
+          - no split between contract and body;
+          - no tracking of reads;
+          - no finish gate;
+          - no evaluation.
+        Concord adds these.
+
+[aura] Aura: run multiple coding agents in parallel without merge conflicts
+  Page: https://auravcs.com/learn/run-multiple-coding-agents-in-parallel
+  Why:  Commercial beta with AST merge and symbol claims. It confirms industry
+        interest in symbol-level coordination, but its claims are declared and it
+        publishes no evaluation.
+
+[claudesquad] Claude Squad: manage multiple AI terminal agents
+  Code: https://github.com/smtg-ai/claude-squad
+  Why:  A worktree-per-agent session manager: isolation without coordination.
+        This is the setup Concord makes safe.
+
+[vibekanban] Vibe Kanban: orchestrate AI coding agents
+  Code: https://github.com/BloopAI/vibe-kanban
+  Why:  Same as Claude Squad: parallel agents in isolated worktrees, with
+        conflicts left for merge time.
+
+[treesitter] Tree-sitter: an incremental parsing system for programming tools
+  Page: https://tree-sitter.github.io/tree-sitter/
+  Code: https://github.com/tree-sitter/tree-sitter
+        https://github.com/tree-sitter/tree-sitter-python
+        https://github.com/tree-sitter/py-tree-sitter
+  Why:  Concord's language front-end (crate concord-lang). It parses Python into
+        symbols, signatures, call sites and digests of contract vs. body.
+
+[mergiraf] Mergiraf: a syntax-aware git merge driver
+  Page: https://mergiraf.org
+  Why:  A structured, tree-sitter-based merge. A candidate to resolve Concord's
+        symbol-disjoint textual conflicts automatically, instead of handing them
+        to an agent.
+
+
+7. ADDITIONAL REPOSITORIES USED OR STUDIED DURING DEVELOPMENT (not cited in the proposal)
+--------------------------------------------------------------------------------------
+
+Concord itself
+  Code: https://github.com/lucas-rus/concord
+
+merge-semantics: post-merge semantic conflict checker for parallel coding agents
+  Code: https://github.com/shouvikkkk/merge-semantics
+  Why:  A taxonomy of semantic findings (removed but still referenced, renamed vs.
+        old caller) that informed Concord's finding types.
+
+Serena: LSP-backed symbol tools for agents
+  Code: https://github.com/oraios/serena
+  Why:  Design reference for driving language servers (pyright and others), a
+        possible higher-precision alternative to Concord's own resolver.
+
+Griffe: Python API signatures and breaking-change detection
+  Code: https://github.com/mkdocstrings/griffe
+  Why:  Inspiration for Concord's breaking vs. compatible classification
+        (compat::classify), and a possible oracle to validate it.
+
+cargo-semver-checks: semver violation scanner for Rust crates
+  Code: https://github.com/obi1kenobi/cargo-semver-checks
+  Why:  The same idea (API-level breaking-change rules) in another language.
+
+aider: AI pair programming in the terminal
+  Code: https://github.com/Aider-AI/aider
+  Why:  Its "repo map" (tree-sitter tags + PageRank) is a model for ranking which
+        call sites to show in Concord's notices.

@@ -64,3 +64,5 @@ A living index of the research and tools Concord builds on. Numbers are quoted f
   - [Agentless](https://arxiv.org/abs/2407.01489).
   - [MetaGPT](https://arxiv.org/abs/2308.00352).
   - [ChatDev](https://arxiv.org/abs/2307.07924).
+
+The full bibliography of the thesis proposal, with direct PDF links, repositories and a note on how each source helps Concord, is in [`docs/bibliography/references.txt`](../bibliography/references.txt) (BibTeX: [`references.bib`](../bibliography/references.bib)).
