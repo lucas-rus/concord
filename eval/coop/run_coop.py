@@ -132,6 +132,16 @@ def main() -> int:
                 print(f"  concord run failed: {r.stderr.strip()[-400:]}", file=sys.stderr)
                 continue
             rep = json.loads(reports[-1].read_text())
+            # Provider failure (usage limit, API error before any work): not an
+            # outcome of the mode. Record nothing and stop, so a later run of
+            # the same command resumes here.
+            failed = [a["name"] for a in rep["agents"]
+                      if not a.get("cost_usd") or (a.get("is_error") and any(
+                          m in str(a.get("result", "")).lower() for m in ("limit", "quota", "rate limit", "overloaded")))]
+            if failed:
+                print(f"  provider failure for {failed}: {str(rep['agents'][0].get('result', ''))[:120]}; stopping",
+                      file=sys.stderr)
+                return 3
             hm = re.search(r"HIDDEN f1=(\d+) f2=(\d+)", rep["integration"]["tests_output_tail"])
             row = {
                 "pair": spec,
