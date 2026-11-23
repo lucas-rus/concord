@@ -5,7 +5,9 @@
   title        = {Agentic Software Engineering: Foundational Pillars and a Research Roadmap},
   year         = {2025},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2509.06216}{arXiv:2509.06216}},
-  url          = {https://arxiv.org/abs/2509.06216}
+  url          = {https://arxiv.org/abs/2509.06216},
+  pdf          = {https://arxiv.org/pdf/2509.06216},
+  annote       = {Frames the field (SE 3.0, structured agentic software engineering) and names multi-agent coordination as an open research pillar. This is where the thesis positions itself.}
 }
 
 @misc{li2025aidev,
@@ -13,7 +15,9 @@
   title        = {The Rise of {AI} Teammates in Software Engineering ({SE}) 3.0: How Autonomous Coding Agents Are Reshaping Software Engineering},
   year         = {2025},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2507.15003}{arXiv:2507.15003}},
-  url          = {https://arxiv.org/abs/2507.15003}
+  url          = {https://arxiv.org/abs/2507.15003},
+  pdf          = {https://arxiv.org/pdf/2507.15003},
+  annote       = {Large-scale evidence (the AIDev dataset) that autonomous agents already author many real pull requests. This motivates why coordinating several of them matters in practice.}
 }
 
 @inproceedings{jimenez2024swebench,
@@ -21,7 +25,12 @@
   title     = {{SWE}-bench: Can Language Models Resolve Real-World {GitHub} Issues?},
   booktitle = {International Conference on Learning Representations (ICLR)},
   year      = {2024},
-  note      = {\href{https://arxiv.org/abs/2310.06770}{arXiv:2310.06770}}
+  note      = {\href{https://arxiv.org/abs/2310.06770}{arXiv:2310.06770}},
+  eprint       = {2310.06770},
+  archivePrefix = {arXiv},
+  pdf          = {https://arxiv.org/pdf/2310.06770},
+  repository   = {https://github.com/SWE-bench/SWE-bench},
+  annote       = {The standard single-agent benchmark. CooperBench and Concord's evaluation follow its "hidden tests decide success" protocol.}
 }
 
 @inproceedings{yang2024sweagent,
@@ -29,7 +38,12 @@
   title     = {{SWE}-agent: Agent-Computer Interfaces Enable Automated Software Engineering},
   booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
   year      = {2024},
-  note      = {\href{https://arxiv.org/abs/2405.15793}{arXiv:2405.15793}}
+  note      = {\href{https://arxiv.org/abs/2405.15793}{arXiv:2405.15793}},
+  eprint       = {2405.15793},
+  archivePrefix = {arXiv},
+  pdf          = {https://arxiv.org/pdf/2405.15793},
+  repository   = {https://github.com/SWE-agent/SWE-agent},
+  annote       = {Shows the agent-computer interface shapes agent performance. Concord's notices are injected through that interface (tool results, hooks), not through a separate chat channel.}
 }
 
 @inproceedings{wang2025openhands,
@@ -37,7 +51,12 @@
   title     = {{OpenHands}: An Open Platform for {AI} Software Developers as Generalist Agents},
   booktitle = {International Conference on Learning Representations (ICLR)},
   year      = {2025},
-  note      = {\href{https://arxiv.org/abs/2407.16741}{arXiv:2407.16741}}
+  note      = {\href{https://arxiv.org/abs/2407.16741}{arXiv:2407.16741}},
+  eprint       = {2407.16741},
+  archivePrefix = {arXiv},
+  pdf          = {https://arxiv.org/pdf/2407.16741},
+  repository   = {https://github.com/OpenHands/OpenHands https://github.com/OpenHands/software-agent-sdk},
+  annote       = {The agent platform used by CooperBench's official harness. It is a candidate second agent runtime for Concord, e.g. with open models such as Nemotron.}
 }
 
 @misc{xia2024agentless,
@@ -45,7 +64,10 @@
   title        = {Agentless: Demystifying {LLM}-based Software Engineering Agents},
   year         = {2024},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2407.01489}{arXiv:2407.01489}},
-  url          = {https://arxiv.org/abs/2407.01489}
+  url          = {https://arxiv.org/abs/2407.01489},
+  pdf          = {https://arxiv.org/pdf/2407.01489},
+  repository   = {https://github.com/OpenAutoCoder/Agentless},
+  annote       = {A reminder that simple, structured pipelines can beat free-form agents. Concord's notices are structured and verifiable for the same reason.}
 }
 
 @inproceedings{hong2024metagpt,
@@ -53,7 +75,12 @@
   title     = {{MetaGPT}: Meta Programming for a Multi-Agent Collaborative Framework},
   booktitle = {International Conference on Learning Representations (ICLR)},
   year      = {2024},
-  note      = {\href{https://arxiv.org/abs/2308.00352}{arXiv:2308.00352}}
+  note      = {\href{https://arxiv.org/abs/2308.00352}{arXiv:2308.00352}},
+  eprint       = {2308.00352},
+  archivePrefix = {arXiv},
+  pdf          = {https://arxiv.org/pdf/2308.00352},
+  repository   = {https://github.com/FoundationAgents/MetaGPT},
+  annote       = {Role-based multi-agent software development that coordinates through documents and roles, not code. Concord coordinates at the code level instead.}
 }
 
 @inproceedings{qian2024chatdev,
@@ -61,7 +88,12 @@
   title     = {{ChatDev}: Communicative Agents for Software Development},
   booktitle = {Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL)},
   year      = {2024},
-  note      = {\href{https://arxiv.org/abs/2307.07924}{arXiv:2307.07924}}
+  note      = {\href{https://arxiv.org/abs/2307.07924}{arXiv:2307.07924}},
+  eprint       = {2307.07924},
+  archivePrefix = {arXiv},
+  pdf          = {https://arxiv.org/pdf/2307.07924},
+  repository   = {https://github.com/OpenBMB/ChatDev},
+  annote       = {Multi-agent development by conversation. CooperBench shows free-form communication alone is not enough, and Concord replaces it with protocol-driven notices.}
 }
 
 % ===================== Empirical studies of agent PR conflicts =====================
@@ -71,7 +103,11 @@
   title     = {{AgenticFlict}: A Large-Scale Dataset of Merge Conflicts in {AI} Coding Agent Pull Requests on {GitHub}},
   booktitle = {ACM International Conference on AI-powered Software (AIware)},
   year      = {2026},
-  note      = {\href{https://arxiv.org/abs/2604.03551}{arXiv:2604.03551}}
+  note      = {\href{https://arxiv.org/abs/2604.03551}{arXiv:2604.03551}},
+  eprint       = {2604.03551},
+  archivePrefix = {arXiv},
+  pdf          = {https://arxiv.org/pdf/2604.03551},
+  annote       = {The headline motivation. Replaying 107K+ agent PRs shows that 27.67\% have textual merge conflicts. It establishes that agent concurrency conflicts are frequent, and it only measures textual ones, which is the gap Concord addresses at the contract level.}
 }
 
 @misc{xu2026agentprs,
@@ -79,7 +115,9 @@
   title        = {{AI} Agent Pull Requests on {GitHub}: Frequency, Structure, and Merge Conflict Rates},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2607.04697}{arXiv:2607.04697}},
-  url          = {https://arxiv.org/abs/2607.04697}
+  url          = {https://arxiv.org/abs/2607.04697},
+  pdf          = {https://arxiv.org/pdf/2607.04697},
+  annote       = {Shows the conflict risk grows when agents work concurrently: 40.2\% of repositories have concurrently open agent PR pairs; the conflict rate is 41.7\% for different agents vs. 19.8\% for the same agent; 84.4\% of conflicted files are source code. Supports the claim that coordination must happen at the code level.}
 }
 
 @inproceedings{campos2026merge,
@@ -87,7 +125,9 @@
   title     = {How {AI} Coding Agents Resolve Merge Conflicts: An Empirical Study},
   booktitle = {Brazilian Symposium on Software Engineering (SBES)},
   year      = {2026},
-  note      = {\href{https://cbsoft.sbc.org.br/2026/data/papers/sbes/How\%20AI\%20Coding\%20Agents\%20Resolve\%20Merge\%20Conflicts\%20An\%20Empirical\%20Study.pdf}{paper PDF}}
+  note      = {\href{https://cbsoft.sbc.org.br/2026/data/papers/sbes/How\%20AI\%20Coding\%20Agents\%20Resolve\%20Merge\%20Conflicts\%20An\%20Empirical\%20Study.pdf}{paper PDF}},
+  pdf          = {https://cbsoft.sbc.org.br/2026/data/papers/sbes/How%20AI%20Coding%20Agents%20Resolve%20Merge%20Conflicts%20An%20Empirical%20Study.pdf},
+  annote       = {Humans still author 96.1\% of the conflicting merge commits in AI-authored PRs, so today conflict resolution falls back to people. Concord's goal is to prevent or resolve these conflicts while the agents are still working.}
 }
 
 % ===================== Coordination of concurrent coding agents =====================
@@ -97,7 +137,10 @@
   title        = {{CooperBench}: Why Coding Agents Cannot be Your Teammates Yet},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2601.13295}{arXiv:2601.13295}},
-  url          = {https://arxiv.org/abs/2601.13295}
+  url          = {https://arxiv.org/abs/2601.13295},
+  pdf          = {https://arxiv.org/pdf/2601.13295},
+  repository   = {https://github.com/cooperbench/CooperBench},
+  annote       = {Concord's main benchmark: 652 two-feature tasks. It quantifies the "curse of coordination": cooperating agents keep only 0.59 of solo performance. Free-form messaging does not help, which motivates structured, verifiable notices instead of chat. Concord uses its dataset for two evaluations: RQ1: gold patches, eval/rq1; the live agent experiments: eval/coop.}
 }
 
 @misc{xia2026passes,
@@ -105,7 +148,9 @@
   title        = {Passes Alone, Fails Together: Benchmarking Semantic Coordination in Parallel {LLM}-Agent Development},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2609.25396}{arXiv:2609.25396}},
-  url          = {https://arxiv.org/abs/2609.25396}
+  url          = {https://arxiv.org/abs/2609.25396},
+  pdf          = {https://arxiv.org/pdf/2609.25396},
+  annote       = {Shows semantic interference after a clean merge, and that a message describing the concurrent change recovers 82\% of it. This is the direct justification for Concord's contract-change notices. It is a benchmark only and proposes no mitigation; Concord is one.}
 }
 
 @misc{pugachev2025codecrdt,
@@ -113,7 +158,9 @@
   title        = {{CodeCRDT}: Observation-Driven Coordination for Multi-Agent {LLM} Code Generation},
   year         = {2025},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2510.18893}{arXiv:2510.18893}},
-  url          = {https://arxiv.org/abs/2510.18893}
+  url          = {https://arxiv.org/abs/2510.18893},
+  pdf          = {https://arxiv.org/pdf/2510.18893},
+  annote       = {Agents share character-level CRDT state and observe each other. Concord borrows the idea of observing instead of declaring. The paper reports 5-10\% semantic conflicts that the CRDT cannot prevent; Concord targets them with symbol contracts.}
 }
 
 @misc{cho2026agentroom,
@@ -121,7 +168,9 @@
   title        = {{AgentRoom}: Concurrent Multi-Agent Coding in a {CRDT}-Backed Shared Workspace},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2608.23740}{arXiv:2608.23740}},
-  url          = {https://arxiv.org/abs/2608.23740}
+  url          = {https://arxiv.org/abs/2608.23740},
+  pdf          = {https://arxiv.org/pdf/2608.23740},
+  annote       = {File-level claims exposed as MCP tools. A baseline for Concord's symbol-level (rather than file-level) granularity.}
 }
 
 @misc{sarkar2026grite,
@@ -129,7 +178,9 @@
   title        = {Before the Pull Request: Mining Multi-Agent Coordination},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2606.19616}{arXiv:2606.19616}},
-  url          = {https://arxiv.org/abs/2606.19616}
+  url          = {https://arxiv.org/abs/2606.19616},
+  pdf          = {https://arxiv.org/pdf/2606.19616},
+  annote       = {A signed claim log stored in git removes duplicate work, but claims are at the task level. Contrasts with Concord's automatic code-level leases.}
 }
 
 @misc{huang2026atm,
@@ -137,7 +188,9 @@
   title        = {{ATM}: {CID}-Brokered Pre-Write Admission for Multi-Agent Code Co-Synthesis},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2607.00041}{arXiv:2607.00041}},
-  url          = {https://arxiv.org/abs/2607.00041}
+  url          = {https://arxiv.org/abs/2607.00041},
+  pdf          = {https://arxiv.org/pdf/2607.00041},
+  annote       = {Pre-write admission based on declared change intents. A comparison point for Concord's observed (not declared) footprints.}
 }
 
 @misc{nikolaev2026claimplane,
@@ -145,7 +198,10 @@
   title        = {Claim Plane: Reliability Gains and the Limits of Selective Concurrency for Parallel Coding Agents},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2608.00947}{arXiv:2608.00947}},
-  url          = {https://arxiv.org/abs/2608.00947}
+  url          = {https://arxiv.org/abs/2608.00947},
+  pdf          = {https://arxiv.org/pdf/2608.00947},
+  repository   = {https://github.com/SkeinRank/claim-plane},
+  annote       = {The most direct competitor, and it also runs on CooperBench pairs. It doubles pair pass rate (23.3\% -> 50.0\%), but serialises 96.7\% of executions. Its declarations under-cover what agents really touch. Concord's thesis is to keep agents parallel and observe footprints automatically; Claim Plane is the baseline to beat.}
 }
 
 @misc{lyu2026coagent,
@@ -153,7 +209,9 @@
   title        = {{CoAgent}: Concurrency Control for Multi-Agent Systems},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2606.15376}{arXiv:2606.15376}},
-  url          = {https://arxiv.org/abs/2606.15376}
+  url          = {https://arxiv.org/abs/2606.15376},
+  pdf          = {https://arxiv.org/pdf/2606.15376},
+  annote       = {Applies database concurrency control (trajectory pre-order, speculative writes) to agents, but at file/directory granularity and with declared footprints. Concord applies the same family of ideas to code symbols.}
 }
 
 @misc{khan2026sbus,
@@ -161,7 +219,9 @@
   title        = {{S-Bus}: Automatic Read-Set Reconstruction for Multi-Agent {LLM} State Coordination},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2605.17076}{arXiv:2605.17076}},
-  url          = {https://arxiv.org/abs/2605.17076}
+  url          = {https://arxiv.org/abs/2605.17076},
+  pdf          = {https://arxiv.org/pdf/2605.17076},
+  annote       = {Shows agents' self-reported read sets overstate their real usage by 32-49\%, so read sets should be reconstructed from observation. This supports Concord's design of deriving reads and uses from tool calls and code analysis instead of asking agents.}
 }
 
 @misc{parakhin2026token,
@@ -169,7 +229,9 @@
   title        = {Token Coherence: Adapting {MESI} Cache Protocols to Minimize Synchronization Overhead in Multi-Agent {LLM} Systems},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2603.15183}{arXiv:2603.15183}},
-  url          = {https://arxiv.org/abs/2603.15183}
+  url          = {https://arxiv.org/abs/2603.15183},
+  pdf          = {https://arxiv.org/pdf/2603.15183},
+  annote       = {Also maps MESI cache coherence onto agents, but on generic shared artifacts and in simulation only. Concord implements a MESI-like protocol on real code symbols, with real agents.}
 }
 
 @misc{yang2026cocoder,
@@ -177,7 +239,9 @@
   title        = {When Parallelism Pays Off: Cohesion-Aware Task Partitioning for Multi-Agent Coding},
   year         = {2026},
   howpublished = {arXiv preprint \href{https://arxiv.org/abs/2606.00953}{arXiv:2606.00953}},
-  url          = {https://arxiv.org/abs/2606.00953}
+  url          = {https://arxiv.org/abs/2606.00953},
+  pdf          = {https://arxiv.org/pdf/2606.00953},
+  annote       = {Avoids conflicts by partitioning tasks up front with a static dependency graph. Complementary to Concord, which handles the dependencies that only appear while agents work.}
 }
 
 % ===================== Classical SE: awareness, merge, semantic conflicts =====================
@@ -188,7 +252,9 @@
   booktitle = {Proceedings of the 19th ACM SIGSOFT Symposium and the 13th European Conference on Foundations of Software Engineering (ESEC/FSE)},
   pages     = {168--178},
   year      = {2011},
-  note      = {\href{https://doi.org/10.1145/2025113.2025139}{doi:10.1145/2025113.2025139}}
+  note      = {\href{https://doi.org/10.1145/2025113.2025139}{doi:10.1145/2025113.2025139}},
+  doi          = {10.1145/2025113.2025139},
+  annote       = {Crystal speculatively merges developers' work and builds/tests it to find conflicts early. Concord's finish gate and virtual merges (git merge-tree) apply this idea to agents, continuously.}
 }
 
 @article{sarma2012palantir,
@@ -199,7 +265,9 @@
   number  = {4},
   pages   = {889--908},
   year    = {2012},
-  note      = {\href{https://doi.org/10.1109/TSE.2011.64}{doi:10.1109/TSE.2011.64}}
+  note      = {\href{https://doi.org/10.1109/TSE.2011.64}{doi:10.1109/TSE.2011.64}},
+  doi          = {10.1109/TSE.2011.64},
+  annote       = {Workspace awareness and the distinction between direct and indirect conflicts. Concord's "contract dependency" findings are indirect conflicts in Palantir's sense.}
 }
 
 @inproceedings{guimaraes2012wecode,
@@ -208,7 +276,9 @@
   booktitle = {Proceedings of the 34th International Conference on Software Engineering (ICSE)},
   pages     = {342--352},
   year      = {2012},
-  note      = {\href{https://doi.org/10.1109/ICSE.2012.6227180}{doi:10.1109/ICSE.2012.6227180}}
+  note      = {\href{https://doi.org/10.1109/ICSE.2012.6227180}{doi:10.1109/ICSE.2012.6227180}},
+  doi          = {10.1109/ICSE.2012.6227180},
+  annote       = {Continuous merging of uncommitted changes to detect conflicts early. Concord snapshots each agent's uncommitted worktree after every tool call in the same spirit.}
 }
 
 @inproceedings{apel2011semistructured,
@@ -217,7 +287,9 @@
   booktitle = {Proceedings of the 19th ACM SIGSOFT Symposium and the 13th European Conference on Foundations of Software Engineering (ESEC/FSE)},
   pages     = {190--200},
   year      = {2011},
-  note      = {\href{https://doi.org/10.1145/2025113.2025141}{doi:10.1145/2025113.2025141}}
+  note      = {\href{https://doi.org/10.1145/2025113.2025141}{doi:10.1145/2025113.2025141}},
+  doi          = {10.1145/2025113.2025141},
+  annote       = {Merging by program structure instead of lines. This is the basis for Concord's finding that many textual conflicts are symbol-disjoint (24\% in RQ1) and could be merged structurally.}
 }
 
 @article{dasilva2024sam,
@@ -227,7 +299,9 @@
   volume  = {214},
   pages   = {112070},
   year    = {2024},
-  note      = {\href{https://doi.org/10.1016/j.jss.2024.112070}{doi:10.1016/j.jss.2024.112070}}
+  note      = {\href{https://doi.org/10.1016/j.jss.2024.112070}{doi:10.1016/j.jss.2024.112070}},
+  doi          = {10.1016/j.jss.2024.112070},
+  annote       = {Semantic conflicts detected by running tests. Concord's validation of its flags against the CooperBench hidden tests (eval/rq1/validate\_pairs.py) follows this approach.}
 }
 
 % ===================== Systems: concurrency control and coherence =====================
@@ -240,7 +314,9 @@
   number  = {2},
   pages   = {213--226},
   year    = {1981},
-  note      = {\href{https://doi.org/10.1145/319566.319567}{doi:10.1145/319566.319567}}
+  note      = {\href{https://doi.org/10.1145/319566.319567}{doi:10.1145/319566.319567}},
+  doi          = {10.1145/319566.319567},
+  annote       = {Concord is optimistic: agents work freely and are validated at the finish gate, like OCC's validation phase.}
 }
 
 @inproceedings{gray1989leases,
@@ -249,7 +325,9 @@
   booktitle = {Proceedings of the 12th ACM Symposium on Operating Systems Principles (SOSP)},
   pages     = {202--210},
   year      = {1989},
-  note      = {\href{https://doi.org/10.1145/74850.74870}{doi:10.1145/74850.74870}}
+  note      = {\href{https://doi.org/10.1145/74850.74870}{doi:10.1145/74850.74870}},
+  doi          = {10.1145/74850.74870},
+  annote       = {Concord's leases on symbol contracts: the first agent to change a contract owns it; the lease is released when the agent finishes.}
 }
 
 @inproceedings{papamarcos1984mesi,
@@ -258,7 +336,9 @@
   booktitle = {Proceedings of the 11th Annual International Symposium on Computer Architecture (ISCA)},
   pages     = {348--354},
   year      = {1984},
-  note      = {\href{https://doi.org/10.1145/800015.808204}{doi:10.1145/800015.808204}}
+  note      = {\href{https://doi.org/10.1145/800015.808204}{doi:10.1145/800015.808204}},
+  doi          = {10.1145/800015.808204},
+  annote       = {The MESI protocol. Concord's coherence directory maps it onto code: private worktrees are the caches; symbol contracts are the cache lines; contract changes invalidate dependent agents.}
 }
 
 @inproceedings{shapiro2011crdt,
@@ -269,7 +349,9 @@
   volume    = {6976},
   pages     = {386--400},
   year      = {2011},
-  note      = {\href{https://doi.org/10.1007/978-3-642-24550-3_29}{doi:10.1007/978-3-642-24550-3\_29}}
+  note      = {\href{https://doi.org/10.1007/978-3-642-24550-3_29}{doi:10.1007/978-3-642-24550-3\_29}},
+  doi          = {10.1007/978-3-642-24550-3_29},
+  annote       = {The theory behind CodeCRDT and AgentRoom. It explains why character-level convergence does not imply semantic correctness, which is the gap Concord fills.}
 }
 
 % ===================== Tools and documentation (accessed November 2026) =====================
@@ -279,7 +361,9 @@
   title        = {Orchestrate teams of {Claude Code} sessions (agent teams)},
   howpublished = {\url{https://code.claude.com/docs/en/agent-teams}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/anthropics/claude-code},
+  annote       = {The state of practice. The docs tell users to split work so that each teammate owns different files, i.e. there is no code-level coordination. Concord adds that coordination.}
 }
 
 @misc{cchooks,
@@ -287,7 +371,8 @@
   title        = {{Claude Code} hooks reference},
   howpublished = {\url{https://code.claude.com/docs/en/hooks}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  annote       = {Concord's integration surface: PostToolUse delivers notices via additionalContext; the Stop hook implements the finish gate. `concord run` launches Claude Code agents with these hooks.}
 }
 
 @misc{mcp,
@@ -295,15 +380,19 @@
   title        = {Model Context Protocol specification},
   howpublished = {\url{https://modelcontextprotocol.io}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/modelcontextprotocol/modelcontextprotocol},
+  annote       = {The standard way to expose tools to agents. A possible agent-independent interface for Concord (AgentRoom uses it for its claims).}
 }
 
 @misc{gastown,
   author       = {Steve Yegge},
   title        = {Gas Town: multi-agent orchestrator for coding agents},
-  howpublished = {\url{https://github.com/steveyegge/gastown}},
+  howpublished = {\url{https://github.com/gastownhall/gastown}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/gastownhall/gastown},
+  annote       = {An agent "factory" with a Bors-style bisecting merge queue. It is the model for Concord's integration step, but it detects problems only at merge time.}
 }
 
 @misc{clash,
@@ -311,7 +400,9 @@
   title        = {Clash: avoid merge conflicts across git worktrees for parallel {AI} coding agents},
   howpublished = {\url{https://github.com/clash-sh/clash}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/clash-sh/clash},
+  annote       = {Pairwise git merge-tree checks between worktrees, in Rust. Shows the technique Concord also uses, but it is file-level and textual only.}
 }
 
 @misc{grove,
@@ -319,7 +410,9 @@
   title        = {Grove: cross-worktree conflict intelligence for git},
   howpublished = {\url{https://github.com/nathandrake2406/grove}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/NathanDrake2406/grove},
+  annote       = {The closest prior tool: overlap scores at file, hunk, symbol and import level. However, it is passive: no split between contract and body; no tracking of reads; no finish gate; no evaluation. Concord adds these.}
 }
 
 @misc{aura,
@@ -327,7 +420,8 @@
   title        = {Run multiple coding agents in parallel without merge conflicts},
   howpublished = {\url{https://auravcs.com/learn/run-multiple-coding-agents-in-parallel}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  annote       = {Commercial beta with AST merge and symbol claims. It confirms industry interest in symbol-level coordination, but its claims are declared and it publishes no evaluation.}
 }
 
 @misc{claudesquad,
@@ -335,7 +429,9 @@
   title        = {Claude Squad: manage multiple {AI} terminal agents},
   howpublished = {\url{https://github.com/smtg-ai/claude-squad}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/smtg-ai/claude-squad},
+  annote       = {A worktree-per-agent session manager: isolation without coordination. This is the setup Concord makes safe.}
 }
 
 @misc{vibekanban,
@@ -343,7 +439,9 @@
   title        = {Vibe Kanban: orchestrate {AI} coding agents},
   howpublished = {\url{https://github.com/BloopAI/vibe-kanban}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/BloopAI/vibe-kanban},
+  annote       = {Same as Claude Squad: parallel agents in isolated worktrees, with conflicts left for merge time.}
 }
 
 @misc{treesitter,
@@ -351,7 +449,9 @@
   title        = {Tree-sitter: an incremental parsing system for programming tools},
   howpublished = {\url{https://tree-sitter.github.io/tree-sitter/}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/tree-sitter/tree-sitter https://github.com/tree-sitter/tree-sitter-python https://github.com/tree-sitter/py-tree-sitter},
+  annote       = {Concord's language front-end (crate concord-lang). It parses Python into symbols, signatures, call sites and digests of contract vs. body.}
 }
 
 @misc{mergiraf,
@@ -359,5 +459,63 @@
   title        = {Mergiraf: a syntax-aware git merge driver},
   howpublished = {\url{https://mergiraf.org}},
   note         = {Accessed: 2026-11-09},
-  year         = {2026}
+  year         = {2026},
+  repository   = {https://github.com/lucas-rus/concord},
+  annote       = {A structured, tree-sitter-based merge. A candidate to resolve Concord's symbol-disjoint textual conflicts automatically, instead of handing them to an agent.}
+}
+
+% ---- Repositories used or studied during development (not cited in the proposal) ----
+
+@misc{concord,
+  title        = {Concord: Contract-Level Coherence for Parallel {AI} Coding Agents},
+  author       = {Lucas-Michael Rus-Gheorghiu},
+  howpublished = {\url{https://github.com/lucas-rus/concord}},
+  repository   = {https://github.com/lucas-rus/concord},
+  note         = {Accessed: 2026-11-23},
+  annote       = {The project this bibliography belongs to.}
+}
+
+@misc{mergesemantics,
+  title        = {merge-semantics: post-merge semantic conflict checker for parallel coding agents},
+  author       = {{shouvikkkk}},
+  howpublished = {\url{https://github.com/shouvikkkk/merge-semantics}},
+  repository   = {https://github.com/shouvikkkk/merge-semantics},
+  note         = {Accessed: 2026-11-23},
+  annote       = {Taxonomy of semantic findings (removed-but-still-referenced, rename vs. old caller) that informed Concord's finding types.}
+}
+
+@misc{serena,
+  title        = {Serena: {LSP}-backed symbol tools for coding agents},
+  author       = {{Oraios AI}},
+  howpublished = {\url{https://github.com/oraios/serena}},
+  repository   = {https://github.com/oraios/serena},
+  note         = {Accessed: 2026-11-23},
+  annote       = {Design reference for driving language servers (pyright etc.); a possible higher-precision alternative to Concord's own resolver.}
+}
+
+@misc{griffe,
+  title        = {Griffe: signatures for entire {Python} programs and {API} breaking-change detection},
+  author       = {{mkdocstrings}},
+  howpublished = {\url{https://github.com/mkdocstrings/griffe}},
+  repository   = {https://github.com/mkdocstrings/griffe},
+  note         = {Accessed: 2026-11-23},
+  annote       = {Inspiration for Concord's breaking vs. compatible classification (compat::classify) and a possible oracle to validate it.}
+}
+
+@misc{cargosemverchecks,
+  title        = {cargo-semver-checks: scan {Rust} crates for semver violations},
+  author       = {Predrag Gruevski},
+  howpublished = {\url{https://github.com/obi1kenobi/cargo-semver-checks}},
+  repository   = {https://github.com/obi1kenobi/cargo-semver-checks},
+  note         = {Accessed: 2026-11-23},
+  annote       = {The same idea (API-level breaking-change rules) in another language.}
+}
+
+@misc{aider,
+  title        = {aider: {AI} pair programming in your terminal},
+  author       = {{Aider-AI}},
+  howpublished = {\url{https://github.com/Aider-AI/aider}},
+  repository   = {https://github.com/Aider-AI/aider},
+  note         = {Accessed: 2026-11-23},
+  annote       = {Its repo map (tree-sitter tags + PageRank) is a model for ranking which call sites to show in Concord's notices.}
 }
