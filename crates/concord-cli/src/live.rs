@@ -484,6 +484,16 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             finish(&mut st, agent);
             return (String::new(), 0);
         }
+        // A merge with conflict markers is in progress: finish it first.
+        if st.peer_merge
+            && st.agents.get(agent).is_some_and(|a| a.pending_peer.is_some())
+            && let Some(reason) = integrate_peers(&mut st, agent)
+        {
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.stats.gate_blocks += 1;
+            }
+            return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+        }
         let (remaining, gate_open) = if st.contracts {
             let remaining = st.auto_ack(agent);
             let open = st.dir.finish_gate(&AgentId::new(agent)).is_open();
@@ -566,6 +576,51 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     continue;
                 }
             };
+            if st.peer_merge {
+                // With peer merge on, a conflicting producer merge is handed to the
+                // agent with conflict markers instead of being aborted.
+                let result = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
+                    .and_then(|_| Repo::merge_keep_conflicts(&wt, &p_head, &format!("concord: merge {p} into {agent}")));
+                match result {
+                    Ok(out) if !out.clean => {
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.merged_producers.insert(p.clone());
+                            a.stats.merges.push(p.clone());
+                            a.stats.gate_blocks += 1;
+                            a.pending_conflicts = out.conflicted_files.clone();
+                            a.pending_peer = Some((p.clone(), p_head.clone()));
+                        }
+                        st.log(
+                            "merge",
+                            json!({ "agent": agent, "producer": p, "clean": false, "files": out.conflicted_files, "kept_markers": true }),
+                        );
+                        let reason = format!(
+                            "[concord] Agent `{p}` changed a contract your code depends on and has finished. Concord \
+                             has merged their work into your worktree; it conflicts with yours in: {}. These files now \
+                             contain git conflict markers (<<<<<<<, =======, >>>>>>>). Edit them so that both your \
+                             feature and theirs are kept and work together (remove all markers), adapt your code to \
+                             their new contracts, run the tests, then finish. Do not discard their changes.",
+                            out.conflicted_files.join(", ")
+                        );
+                        return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+                    }
+                    Ok(_) => {
+                        let new_base = st.repo.virtual_merge(&base, &p_head).ok().flatten().unwrap_or(p_head.clone());
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.base = new_base;
+                            a.merged_producers.insert(p.clone());
+                            a.stats.merges.push(p.clone());
+                        }
+                        merge_notes.push(format!(
+                            "Concord merged agent `{p}`'s finished work into your worktree (commit {}).",
+                            &p_head[..p_head.len().min(10)]
+                        ));
+                        st.log("merge", json!({ "agent": agent, "producer": p, "clean": true }));
+                    }
+                    Err(e) => st.log("error", json!({ "agent": agent, "error": e.to_string() })),
+                }
+                continue;
+            }
             let result = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
                 .and_then(|_| Repo::merge_into(&wt, &p_head, &format!("concord: merge {p} into {agent}")));
             match result {
