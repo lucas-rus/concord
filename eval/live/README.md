@@ -37,3 +37,14 @@ Per-run reports and event logs are in [2026-11-18/](2026-11-18/).
 1. **Notices must be verifiable.** In a smoke test, Haiku ignored an injected note that contradicted the file it had just read, treating it as a possible prompt injection. In an early buggy run, Concord claimed it had merged a change that was not actually in the worktree (the producer's work was uncommitted). The agent checked `git log` and the file, and refused to make the change until it could verify it. Concord therefore merges real code into the agent's worktree before asking it to conform, and tells the agent so in a system-prompt note.
 2. **Calls hide in f-strings.** `f"Total: {price_order(order)} EUR"` was invisible to the first resolver; interpolations are now scanned.
 3. **Scale is still small.** One scenario and three runs per condition: this demonstrates the mechanism, not a statistical result. CooperBench runs follow (see the roadmap).
+
+## Qwen 4 Max through OpenCode (2026-11-23, `--agent-cli opencode`, model `opencode/qwen4-max-free`)
+
+The OpenCode adapter was first validated on this scenario: with Concord, the `currency` agent made `currency` required, Concord sent `invoices` a heads-up and a breaking-change notice, resumed it after it had finished, and it updated its call sites; all 34 tests passed on the integrated code (one run, 10 minutes, $0).
+
+A comparison of 3 runs per condition was **inconclusive** and is not used as evidence:
+
+- in run 3 every agent failed immediately with the free tier's usage limit (`provider.free-limit`, HTTP 429), so nothing was implemented;
+- in 3 of the 4 remaining runs the `currency` agent did not make `currency` a required argument (it left `price_order` unchanged), so there was no breaking change to coordinate, and both conditions passed trivially.
+
+Lesson for the evaluation: with a free model, check that the scenario actually happened (the producer made its contract change) before comparing conditions, and expect the free quota to run out under parallel load.
