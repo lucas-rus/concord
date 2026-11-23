@@ -603,7 +603,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         };
         if remaining.is_empty() && gate_open {
             if st.regions {
-                match crate::regions::gate(&mut st, agent) {
+                match crate::regions::gate(&mut st, agent, Instant::now() < deadline) {
                     crate::regions::Gate::Clear => {}
                     crate::regions::Gate::Wait(owners, text) => {
                         // Never wait for an owner that is itself waiting for us.

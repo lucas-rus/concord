@@ -330,3 +330,47 @@ fn pre_existing_call_sites_are_not_the_consumers_obligation() {
     }
     assert!(fs::read_to_string(&log).unwrap().contains("\"ack\""));
 }
+
+/// Hand-offs are batched (group commit): while an owner the agent yielded to
+/// is still running, Concord waits for it instead of handing over the owners
+/// that have already finished, so the agent re-tests once.
+#[test]
+fn hand_offs_are_batched_while_owners_are_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(repo.clone(), base.clone(), Mode::Enforce, None, Duration::from_secs(5)).unwrap();
+    st.regions = true;
+    let mut wts = Vec::new();
+    for name in ["o1", "o2", "y"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+    edit(&shared, "o1", &wts[0], &BASE.replace("return 1", "return 10"));
+    edit(&shared, "o2", &wts[1], &BASE.replace("return 2", "return 20"));
+    let both = BASE.replace("return 1", "return 11").replace("return 2", "return 22");
+    assert!(edit(&shared, "y", &wts[2], &both).contains("region conflict"));
+    // The yielder restores both lines; o1 finishes.
+    edit(&shared, "y", &wts[2], BASE);
+    assert_eq!(stop(&shared, "o1"), None);
+    // The yielder tries to finish while o2 runs: Concord waits for o2...
+    let s2 = shared.clone();
+    let waiter = std::thread::spawn(move || stop(&s2, "y"));
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(stop(&shared, "o2"), None);
+    // ...and then hands over both owners at once.
+    let reason = waiter.join().unwrap().expect("hand-off");
+    assert!(reason.contains("`o1`") && reason.contains("`o2`"), "{reason}");
+    let merged = fs::read_to_string(wts[2].join("m.py")).unwrap();
+    assert!(merged.contains("return 10") && merged.contains("return 20"), "{merged}");
+    assert_eq!(stop(&shared, "y"), None);
+}

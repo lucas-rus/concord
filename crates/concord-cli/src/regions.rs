@@ -219,7 +219,12 @@ pub enum Gate {
 }
 
 /// The region part of the finish gate for `agent` (write-set validation).
-pub fn gate(st: &mut State, agent: &str) -> Gate {
+///
+/// `may_wait`: the agent is still within its wait budget. Hand-offs are then
+/// deferred while owners it yielded to are still running, so that all of them
+/// are handed over in one batch (group commit, Gray): every hand-off costs the
+/// agent a re-test turn on its whole context.
+pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let wt = st.agents[agent].worktree.clone();
     let me = match Repo::snapshot_worktree(&wt) {
         Ok(c) => c,
@@ -253,6 +258,44 @@ pub fn gate(st: &mut State, agent: &str) -> Gate {
             return Gate::Block(render(&peer, true, &found));
         }
         heads.push((peer, head));
+    }
+    // Running owners (lower rank): wait for them.
+    let running: Vec<(String, String)> = st
+        .agents
+        .values()
+        .filter(|p| p.name != agent && p.status != Status::Finished && p.rank < my_rank)
+        .filter_map(|p| p.snapshot.clone().map(|s| (p.name.clone(), s)))
+        .collect();
+    let mut owners = Vec::new();
+    let mut text = String::new();
+    for (peer, snap) in running {
+        let found = conflicts(&st.repo, &me, &snap);
+        if !found.is_empty() {
+            for f in &found {
+                st.region_alerted
+                    .insert((agent.to_owned(), peer.clone(), f.file.clone()));
+            }
+            st.region_yields.insert((agent.to_owned(), peer.clone()));
+            text.push_str(&render(&peer, false, &found));
+            owners.push(peer);
+        } else if st.region_yields.contains(&(agent.to_owned(), peer.clone()))
+            && !st.agents[agent].merged_producers.contains(&peer)
+        {
+            // The agent left the owner's lines alone, possibly restoring its
+            // own change to them: it must receive the owner's finished version
+            // (and re-apply its change on top) before it may finish.
+            let _ = writeln!(
+                text,
+                "[concord] You yielded lines to agent `{peer}`, which is still working. Do not wait, poll or \
+                 schedule anything: finish the rest of your work and try to finish again. When `{peer}` finishes, \
+                 Concord merges their version into your worktree, and you then add any change your feature needs \
+                 to those lines on top of it."
+            );
+            owners.push(peer);
+        }
+    }
+    if !owners.is_empty() && may_wait {
+        return Gate::Wait(owners, text);
     }
     // Pending hand-offs: this agent yielded lines to these finished peers, and
     // the merges are clean. Bring all their versions in at once so the agent
@@ -295,41 +338,6 @@ pub fn gate(st: &mut State, agent: &str) -> Gate {
              of their version; otherwise nothing is left to do. Run the tests and finish.",
             handed.join(", ")
         ));
-    }
-    // Running owners (lower rank): wait for them.
-    let running: Vec<(String, String)> = st
-        .agents
-        .values()
-        .filter(|p| p.name != agent && p.status != Status::Finished && p.rank < my_rank)
-        .filter_map(|p| p.snapshot.clone().map(|s| (p.name.clone(), s)))
-        .collect();
-    let mut owners = Vec::new();
-    let mut text = String::new();
-    for (peer, snap) in running {
-        let found = conflicts(&st.repo, &me, &snap);
-        if !found.is_empty() {
-            for f in &found {
-                st.region_alerted
-                    .insert((agent.to_owned(), peer.clone(), f.file.clone()));
-            }
-            st.region_yields.insert((agent.to_owned(), peer.clone()));
-            text.push_str(&render(&peer, false, &found));
-            owners.push(peer);
-        } else if st.region_yields.contains(&(agent.to_owned(), peer.clone()))
-            && !st.agents[agent].merged_producers.contains(&peer)
-        {
-            // The agent left the owner's lines alone, possibly restoring its
-            // own change to them: it must receive the owner's finished version
-            // (and re-apply its change on top) before it may finish.
-            let _ = writeln!(
-                text,
-                "[concord] You yielded lines to agent `{peer}`, which is still working. Do not wait, poll or \
-                 schedule anything: finish the rest of your work and try to finish again. When `{peer}` finishes, \
-                 Concord merges their version into your worktree, and you then add any change your feature needs \
-                 to those lines on top of it."
-            );
-            owners.push(peer);
-        }
     }
     if owners.is_empty() {
         Gate::Clear
