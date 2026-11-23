@@ -58,6 +58,9 @@ pub enum AgentCli {
 const OPENCODE_PLUGIN: &str = include_str!("opencode_plugin.js");
 /// A turn producing no output for this long is considered hung.
 const OPENCODE_IDLE: Duration = Duration::from_secs(300);
+/// How often a turn is retried when OpenCode's server fails to start.
+const OPENCODE_START_RETRIES: u64 = 4;
+const OPENCODE_START_FAILURE: &str = "exited before reporting readiness";
 /// Upper bound on turns (first prompt plus gate continuations) per agent.
 const OPENCODE_MAX_TURNS: u32 = 10;
 
@@ -375,12 +378,29 @@ impl OpencodeJob {
         let _ = std::fs::write(&self.out, summary.to_string());
     }
 
-    /// One `opencode run` invocation. Returns (session id, final text, cost, ok).
+    /// One turn. Retries when OpenCode's server fails to start, which
+    /// happens now and then when many agents start at the same moment.
     fn turn(&self, n: u32, message: &str, session: Option<&str>) -> (Option<String>, String, f64, bool) {
+        let mut attempt = 0u64;
+        loop {
+            let (r, startup_failed) = self.turn_once(n, message, session);
+            if !startup_failed || attempt >= OPENCODE_START_RETRIES {
+                return r;
+            }
+            attempt += 1;
+            // Back off, spread over agents so they do not collide again.
+            let spread = self.name.bytes().map(u64::from).sum::<u64>() % 1000;
+            std::thread::sleep(Duration::from_millis(2000 * attempt + spread));
+        }
+    }
+
+    /// One `opencode run` invocation. Returns ((session id, final text, cost,
+    /// ok), whether OpenCode's server failed to start).
+    fn turn_once(&self, n: u32, message: &str, session: Option<&str>) -> ((Option<String>, String, f64, bool), bool) {
         let log = PathBuf::from(format!("{}.turn{n}.jsonl", self.log_prefix.display()));
         let err = PathBuf::from(format!("{}.turn{n}.err", self.log_prefix.display()));
         let (Ok(out_f), Ok(err_f)) = (std::fs::File::create(&log), std::fs::File::create(&err)) else {
-            return (None, String::new(), 0.0, false);
+            return ((None, String::new(), 0.0, false), false);
         };
         let mut cmd = Command::new(&self.exe);
         cmd.current_dir(&self.worktree)
@@ -395,7 +415,7 @@ impl OpencodeJob {
         }
         cmd.arg(message).stdin(Stdio::null()).stdout(out_f).stderr(err_f);
         let Ok(mut child) = cmd.spawn() else {
-            return (None, String::new(), 0.0, false);
+            return ((None, String::new(), 0.0, false), false);
         };
         // Watchdog: kill a turn that produces no output for OPENCODE_IDLE.
         let mut last_len = 0u64;
@@ -417,8 +437,13 @@ impl OpencodeJob {
             }
             std::thread::sleep(Duration::from_millis(500));
         };
-        let (sid, text, cost) = parse_opencode_events(&std::fs::read_to_string(&log).unwrap_or_default());
-        (sid.or_else(|| session.map(str::to_owned)), text, cost, ok)
+        let events = std::fs::read_to_string(&log).unwrap_or_default();
+        let startup_failed = !ok && events.contains(OPENCODE_START_FAILURE);
+        let (sid, text, cost) = parse_opencode_events(&events);
+        (
+            (sid.or_else(|| session.map(str::to_owned)), text, cost, ok),
+            startup_failed,
+        )
     }
 }
 
@@ -437,6 +462,7 @@ fn parse_opencode_events(jsonl: &str) -> (Option<String>, String, f64) {
             .get("sessionID")
             .or_else(|| part.get("sessionID"))
             .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
         {
             sid = Some(s.to_owned());
         }
@@ -739,4 +765,29 @@ pub fn render(r: &RunReport) -> String {
         s.push_str(&format!("\n### {} says\n\n{}\n", a.name, a.result.trim()));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_events_skip_empty_session_ids() {
+        let startup_failure = r#"{"type":"error","sessionID":"","error":{"message":"Standalone server exited before reporting readiness"}}"#;
+        let (sid, text, cost) = parse_opencode_events(startup_failure);
+        assert_eq!(sid, None);
+        assert!(text.is_empty());
+        assert_eq!(cost, 0.0);
+        assert!(startup_failure.contains(OPENCODE_START_FAILURE));
+
+        let ok = concat!(
+            r#"{"type":"text","sessionID":"ses_1","part":{"sessionID":"ses_1","text":"done"}}"#,
+            "\n",
+            r#"{"type":"step_finish","part":{"sessionID":"ses_1","cost":0.25}}"#,
+        );
+        assert_eq!(
+            parse_opencode_events(ok),
+            (Some("ses_1".to_owned()), "done".to_owned(), 0.25)
+        );
+    }
 }
