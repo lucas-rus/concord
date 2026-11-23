@@ -2,7 +2,7 @@
 
 This file records what the papers in [`../bibliography/references.txt`](../bibliography/references.txt) say about Concord's design: mechanisms, numbers, and baselines. It is the working memory of the project. Read it before designing or changing a mechanism, a baseline or an experiment.
 
-Reviewed on 2026-11-23, sections 1–3 so far. Sections 4–6 are added when their reviews finish. Numbers come from the full texts unless marked *(abstract only)*.
+Reviewed on 2026-11-23: sections 1, 2, 3, 6 and 7. Sections 4–5 are added when their review finishes. Numbers come from the full texts unless marked *(abstract only)*.
 
 ## 0. Concord against its own proposal (audit, 2026-11-23)
 
@@ -49,7 +49,8 @@ Re-merged with **Mergiraf 0.20** (syntax-aware merge): **3/29** became clean. Fi
   - Agents resolving conflicts keep their own side 79.7% of the time (humans 45.1%) and rarely write combined code (3.9% vs 11.4%). After any agent-side resolution, **check that every peer hunk survives**.
   - Conflicts are small: a median of 2 chunks, with sides of about 2–3 lines of code.
 - **CooperBench** (Khatua et al.), the most important paper:
-  - **The official evaluation merges in three steps:** naive merge, then union merge, then a learned resolver (Qwen2.5-Coder-0.5B). Only then is a conflict scored as a failure (§2.2, App. B). For Claude 4.5 without communication, merge success goes from 12.27% naive to 26.84% after union to 27.30% after the resolver (Table 6). **Our harness uses only the naive merge, which is stricter than the benchmark. Re-score every mode with the official pipeline and report each step.**
+  - **The paper's evaluation** merged in three steps: naive merge, then union merge, then a learned resolver (Qwen2.5-Coder-0.5B). For Claude 4.5 without communication, merge success went from 12.27% naive to 26.84% after union to 27.30% after the resolver (Table 6).
+  - **Correction (verified in the code, CooperBench @63b9d44):** commit 32ad650 (2026-05-21) **removed the union fallback**; see `src/cooperbench/eval/sandbox.py:220`, "No union fallback — union resolves conflicts by concatenating both sides". If the naive merge conflicts, only the first agent's patch is tested against both test suites. **Our naive-merge scoring matches current CooperBench.** The paper's numbers were scored with union, and the thesis must say so when comparing.
   - Communication reduces conflicts but not success. Conflicts are spatial; success needs semantic agreement on values and defaults.
   - A plan in the first turn lowers the conflict rate from 51.5% to 29.4%. Specific line numbers and file paths also help.
   - Failure symptoms: work overlap 33.2%, divergent architecture 29.7%, repetition 14.7%, unresponsiveness 8.7%. Root causes: expectation 42%, commitment 32%, communication 26%.
@@ -102,4 +103,40 @@ Re-merged with **Mergiraf 0.20** (syntax-aware merge): **3/29** became clean. Fi
 5. **Notices carry the completed change plus the action:** the exact new signature, defaults and parameter order; "update your call sites, do not edit the definition" (Passes, CooperBench App. I).
 6. **Files as contract objects:** creation and deletion (AgentPRs: 42% structural).
 7. **Mergiraf at integration** for every condition (proposal §spec). Measured effect alone: 3/29.
-8. **Evaluation:** CooperBench's official merge pipeline; paired McNemar tests; Wilson intervals; per-repository concentration; fraction serialised; "% applies" vs "% resolved".
+8. **Evaluation:** naive merge, as current CooperBench does; also report "after structured merge" separately; paired McNemar tests; Wilson intervals; per-repository concentration; fraction serialised; "% applies" vs "% resolved".
+
+## 6. Tools (sections 6–7), read from source
+
+Sources: clash @2ac931c, grove @0fce00c, mergiraf @0151074, gastown @94cc822, aura @8ced4ea, vibe-kanban @3f095f0, CooperBench @63b9d44, and the agent-teams and hooks docs (read 2026-11-23).
+
+- **`git merge-tree --write-tree` runs custom merge drivers** that are configured in `.git/config` plus `.git/info/attributes` (tested with git 2.48). So a structured driver plugs into Concord's `Repo::merge_tree` and `merge_keep_conflicts` without any code change. Use `.git/info/attributes`, not `.gitattributes`, so the setting does not show up in agents' diffs.
+- **Clash:** an in-memory merge of **committed HEADs only**; uncommitted work counts only as a file-level "active changes" flag. A PreToolUse hook returns `ask`, which a headless run turns into a deny, so Clash works as a file lock on any file a peer touched.
+- **Grove:** includes dirty work. It has five layers (file, hunk within 5 lines, symbol, schema, dependency) and a 500 ms watcher. Two bugs:
+  - the hunk layer compares **new-side** line numbers across branches, which are not comparable; base coordinates are needed;
+  - its PostToolUse hook prints plain stdout, which Claude Code does not inject; it needs JSON `additionalContext`.
+- **Aura** (now Apache-2.0, `Naridon-Inc/aura`; update the thesis text, which calls it a "commercial beta"):
+  - awareness at file level, with a 90 s throttle;
+  - claims are declared through MCP (`aura_zone_claim`, `aura_snapshot`);
+  - its AST merge driver (`src/merge_driver_engine.rs`) keeps both sides when the two sides add **different new top-level named definitions at the same place**. It does not handle top-level assignments or imports, or two methods appended inside the same class.
+- **Mergiraf, Python:**
+  - Commutative merging covers imports, class members (methods and attributes), `from x import a, b`, keyword arguments, sets and `__all__`.
+  - It does **not** resolve: top-level functions appended at the same place (no module group for function definitions; Aura covers exactly this case), top-level constants, statements inserted at the same point of a body, `elif` branches, dict entries, list elements, or new parameters in a `def`.
+  - It line-merges first and solves only the conflicting hunks; 10 s timeout per file.
+  - Mergiraf and Aura complement each other. Measured on our data, Mergiraf alone fixes 3 of 29.
+- **Claude Code agent teams:**
+  - shared working tree (overwrites, not merge conflicts);
+  - no code-level conflict handling; the docs say "break the work so each teammate owns a different set of files";
+  - **does not run in `-p` / headless mode**, so it is not a clean benchmark baseline.
+- **Gas Town:**
+  - the Mayor is an LLM dispatcher ("file it, sling it");
+  - conflicts are found only at merge time, by the Refinery's batch queue, and handed back to the worker (`assign_back`). `auto_rebase` is configured but not implemented;
+  - needs tmux, Dolt and beads, so it is not headless. Use it for qualitative related work only.
+- **The fair LLM-coordinator baseline is CooperBench `--setting team`:**
+  - a lead plus members, a task list, a PLAN.md with disjoint regions;
+  - the lead applies the members' patches and resolves the conflicts;
+  - headless `claude --print`, with ablation flags (`--team-no-task-list` and others).
+  - The lead integrates, so the fair comparison is Concord with peer merge. For concord-bench (OpenCode, Big Pickle) we build the equivalent condition ourselves.
+- **Other ideas:**
+  - `asyncRewake` hooks: wake an agent with a warning between tool calls;
+  - insertion-point arbitration for appends (end of module, class or list): the later agent takes a different anchor;
+  - merge-semantics' `duplicate-definition` and `shared-registry-collision` checks.
