@@ -68,3 +68,21 @@ No conflict markers are ever written into an agent's worktree, and no agent reso
 - **CooperBench** main sample, 32 pairs. Modes: off, contracts (old), contracts plus regions (new), peer. Naive merge, as current CooperBench does. Report the fraction serialised (waits) and the time.
 - **concord-bench** (CommonMark): new condition `parallel-regions`.
 - Ablations: regions without contracts; with and without the merge driver.
+
+## Lessons from the first runs (2026-11-23/24)
+
+Each fix below came from a failure observed with real agents (Haiku), and has a regression test in `crates/concord-cli/tests/regions.rs` unless noted.
+
+1. **Cross-layer deadlock.** Contract waits (a consumer waits for a running producer) and region waits (a yielder waits for a running owner) formed a cycle. On CooperBench jinja 1465:7:8 the owner waited for the producer's new signature while the producer waited for the owner's region, about 30 minutes per pair.
+   - Fix: one waits-for graph across both layers. In a would-be cycle, the wait toward the lower rank is kept, and the lower-ranked agent stops waiting for a higher-ranked one that waits for it. Every cycle has an edge toward a higher rank, so no cycle survives, and the region owner goes first.
+2. **Agents waiting on their own.** A gate block that said "wait a moment and finish again" led an agent to call ScheduleWakeup and poll in 20-minute loops.
+   - Fix: the gate never asks the agent to wait. Agents are denied ScheduleWakeup, Cron, Monitor and RemoteTrigger, and the system note says that Concord does all waiting. (No test; the settings are checked by inspection.)
+3. **Lost features: the yielder finished before the hand-off.** When both features must change the same lines (both add a parameter to `groupby`), the yielder restored its lines as told. The owner was still running, so the gate saw no conflict and let the yielder finish without ever re-applying its change. The hidden tests of the second feature failed in 4 of 6 pairs.
+   - Fix: a yielder with an outstanding yield waits for the owner's hand-off before it may finish. "No conflict" is not "no lost work".
+4. **Hand-offs counted as liveness blocks.** With 12 agents, the last-ranked agents received one hand-off per finish attempt and hit the gate block limit (5 of 12 agents). One finished with an unresolved conflict (CommonMark 567/652).
+   - Fix: pending hand-offs are merged in one batch and do not count toward the limit. Each finished owner hands over at most once, so this is bounded progress.
+   - With fixes 1–4: 644/652, 0 conflicts, no agent at the block limit, 5 contract notices (CommonMark, 12 agents, 10.5 min, $2.83).
+
+Contract-layer fixes found on the same runs (full Concord, 513 notices):
+- `re.match(...)` was resolved to the repository's unique `InlineParser.match`. A receiver bound by an import that does not resolve in the repository is now never matched by name.
+- Agents were blocked on pre-existing call sites (in their base) of a symbol another agent removed. Conformance now covers only call sites the agent wrote; existing callers are the changing agent's job (as in any refactoring).
