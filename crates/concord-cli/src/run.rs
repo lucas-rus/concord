@@ -201,9 +201,26 @@ enum SessionArg<'a> {
 }
 
 fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>) -> Result<()> {
-    for mut r in running {
-        r.child.wait()?;
-        let secs = r.started.elapsed().as_secs_f64();
+    // Poll all agents so each one's time is its own, not the time until the
+    // agents before it in the list have finished.
+    let mut pending = running;
+    let mut done: Vec<(Running, f64)> = Vec::new();
+    while !pending.is_empty() {
+        let mut still = Vec::new();
+        for mut r in pending {
+            if r.child.try_wait()?.is_some() {
+                let secs = r.started.elapsed().as_secs_f64();
+                done.push((r, secs));
+            } else {
+                still.push(r);
+            }
+        }
+        pending = still;
+        if !pending.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    for (r, secs) in done {
         let text = std::fs::read_to_string(&r.out).unwrap_or_default();
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         let e = results.entry(r.name.clone()).or_default();
