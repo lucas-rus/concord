@@ -1,6 +1,6 @@
 {
   "name": "concord",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run a team of parallel coding agents on your repository, coordinated by Concord (contract notices, finish gate, peer merge), and get one integrated branch. Requires the `concord` binary on your PATH.",
   "author": {
     "name": "Lucas-Michael Rus-Gheorghiu"
