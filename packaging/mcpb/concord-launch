@@ -1,0 +1,5 @@
+#!/bin/sh
+# Pick the Concord binary for this machine (MCPB platform overrides cannot
+# distinguish CPU architectures).
+dir="$(cd "$(dirname "$0")" && pwd)"
+exec "$dir/bin/concord-$(uname -s)-$(uname -m)" "$@"

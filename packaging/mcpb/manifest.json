@@ -1,0 +1,37 @@
+{
+  "manifest_version": "0.3",
+  "name": "concord",
+  "display_name": "Concord",
+  "version": "0.0.0",
+  "description": "Run a team of parallel AI coding agents on your repository, coordinated by Concord, and get one integrated branch.",
+  "long_description": "Concord starts several coding agents (OpenCode or Claude Code) in parallel git worktrees on the current repository and coordinates them while they work: an agent is told when another agent changes a function signature it uses, and when it finishes, finished teammates' overlapping work is merged into its worktree so that it resolves the conflict itself. Tools: concord_run, concord_status, concord_result, concord_analyze, concord_cancel.",
+  "author": {
+    "name": "Lucas-Michael Rus-Gheorghiu",
+    "url": "https://github.com/lucas-rus"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lucas-rus/concord"
+  },
+  "homepage": "https://github.com/lucas-rus/concord",
+  "license": "MIT OR Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/concord-launch",
+    "mcp_config": {
+      "command": "${__dirname}/server/concord-launch",
+      "args": ["mcp"],
+      "env": {}
+    }
+  },
+  "tools": [
+    { "name": "concord_run", "description": "Start a team of parallel coding agents on this repository, coordinated by Concord" },
+    { "name": "concord_status", "description": "Progress of a Concord run, or the list of runs" },
+    { "name": "concord_result", "description": "Final report and integration branch of a finished run" },
+    { "name": "concord_analyze", "description": "Check existing branches for merge conflicts and broken function contracts" },
+    { "name": "concord_cancel", "description": "Stop a running Concord run" }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "linux"]
+  }
+}

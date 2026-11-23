@@ -46,10 +46,28 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Build MCPB bundle (all platforms, one launcher)
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          b=build/mcpb
+          mkdir -p "$b/server/bin"
+          cp packaging/mcpb/concord-launch "$b/server/"
+          for pair in aarch64-apple-darwin:Darwin-arm64 x86_64-apple-darwin:Darwin-x86_64 \
+                      x86_64-unknown-linux-gnu:Linux-x86_64 aarch64-unknown-linux-gnu:Linux-aarch64; do
+            target="${pair%%:*}"; os_arch="${pair##*:}"
+            name="concord-${GITHUB_REF_NAME}-${target}"
+            tar -C build -xzf "dist/$name.tar.gz"
+            install -m 755 "build/$name/concord" "$b/server/bin/concord-$os_arch"
+          done
+          jq --arg v "$version" '.version = $v' packaging/mcpb/manifest.json > "$b/manifest.json"
+          (cd "$b" && zip -qr -X ../../dist/concord.mcpb .)
+          shasum -a 256 dist/concord.mcpb | cut -d' ' -f1 > dist/concord.mcpb.sha256
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,3 +76,49 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Concord $GITHUB_REF_NAME" \
             --generate-notes
+
+  registry:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # GitHub OIDC login to the MCP Registry
+      contents: read
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+      - name: Fill in version and bundle checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern concord.mcpb.sha256
+          sha="$(cat concord.mcpb.sha256)"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/concord.mcpb"
+          jq --arg v "$version" --arg u "$url" --arg s "$sha" \
+            '.version = $v | .packages[0].identifier = $u | .packages[0].fileSha256 = $s' server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+      - name: Publish to the MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
