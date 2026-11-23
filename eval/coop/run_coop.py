@@ -61,6 +61,13 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     concord = str(Path(args.concord).resolve())
     results = args.out / "results.jsonl"
+    # Resume: skip (pair, mode) combinations that already have a result.
+    done = set()
+    if results.exists():
+        for line in results.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                done.add((r["pair"], r["mode"]))
 
     for spec in args.pairs.split(","):
         repo_name, task_id, f1, f2 = spec.split(":")
@@ -101,6 +108,8 @@ def main() -> int:
         tasks_file = args.out / f"{repo_name}-{task_id}-{f1}-{f2}.tasks.json"
         tasks_file.write_text(json.dumps(tasks, indent=2))
         for mode in args.modes.split(","):
+            if (spec, mode) in done:
+                continue
             run_out = args.out / "runs" / f"{repo_name}-{task_id}-{f1}-{f2}" / mode
             run_out.mkdir(parents=True, exist_ok=True)
             print(f"{spec} [{mode}] ...", file=sys.stderr, flush=True)
