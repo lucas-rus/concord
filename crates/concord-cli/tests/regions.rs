@@ -219,3 +219,55 @@ fn contract_and_region_waits_never_form_a_cycle() {
     assert!(reason.contains("g(x, y)") || reason.contains("g"), "{reason}");
     let _ = waiter.join().unwrap();
 }
+
+/// A yielder that restored the contested lines may not finish before the
+/// running owner: it must first receive the owner's version (the hand-off),
+/// so that it can re-apply its own change to those lines on top.
+#[test]
+fn yielder_waits_for_the_hand_off_even_after_restoring() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        None,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+    st.regions = true;
+    let mut wts = Vec::new();
+    for name in ["owner", "yielder"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let (owner_wt, yielder_wt) = (&wts[0], &wts[1]);
+    // Both change the same line.
+    edit(&shared, "owner", owner_wt, &BASE.replace("return 1", "return 10"));
+    let out = edit(&shared, "yielder", yielder_wt, &BASE.replace("return 1", "return 11"));
+    assert!(out.contains("region conflict"), "{out}");
+    // The yielder restores the line and tries to finish while the owner runs.
+    edit(&shared, "yielder", yielder_wt, BASE);
+    let reason = stop(&shared, "yielder").expect("blocked");
+    assert!(reason.contains("You yielded lines"), "{reason}");
+    // The owner finishes; the yielder now gets the hand-off, then may finish.
+    assert_eq!(stop(&shared, "owner"), None);
+    let reason = stop(&shared, "yielder").expect("hand-off");
+    assert!(reason.contains("merged their finished work"), "{reason}");
+    assert!(
+        fs::read_to_string(yielder_wt.join("m.py"))
+            .unwrap()
+            .contains("return 10")
+    );
+    assert_eq!(stop(&shared, "yielder"), None);
+}

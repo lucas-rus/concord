@@ -304,6 +304,20 @@ pub fn gate(st: &mut State, agent: &str) -> Gate {
             st.region_yields.insert((agent.to_owned(), peer.clone()));
             text.push_str(&render(&peer, false, &found));
             owners.push(peer);
+        } else if st.region_yields.contains(&(agent.to_owned(), peer.clone()))
+            && !st.agents[agent].merged_producers.contains(&peer)
+        {
+            // The agent left the owner's lines alone, possibly restoring its
+            // own change to them: it must receive the owner's finished version
+            // (and re-apply its change on top) before it may finish.
+            let _ = writeln!(
+                text,
+                "[concord] You yielded lines to agent `{peer}`, which is still working. Do not wait, poll or \
+                 schedule anything: finish the rest of your work and try to finish again. When `{peer}` finishes, \
+                 Concord merges their version into your worktree, and you then add any change your feature needs \
+                 to those lines on top of it."
+            );
+            owners.push(peer);
         }
     }
     if owners.is_empty() {

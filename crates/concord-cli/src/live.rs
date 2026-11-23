@@ -190,6 +190,16 @@ impl State {
         );
     }
 
+    /// Whether `agent` may wait for `target` in the finish gate. Waits that
+    /// would close a cycle are resolved by rank: the wait toward the lower rank
+    /// (CoAgent's order, which is also the region owner) is kept, and the
+    /// lower-ranked agent stops waiting for a higher-ranked one that waits for
+    /// it. Every cycle has an edge toward a higher rank, so none survives.
+    pub(crate) fn may_wait(&self, agent: &str, target: &str) -> bool {
+        let rank = |a: &str| self.agents.get(a).map(|x| x.rank).unwrap_or(usize::MAX);
+        !(rank(target) > rank(agent) && self.waits_for(target, agent))
+    }
+
     /// Whether `from` is (transitively) waiting for `to` in the finish gate.
     pub(crate) fn waits_for(&self, from: &str, to: &str) -> bool {
         let mut seen = BTreeSet::new();
@@ -578,7 +588,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     crate::regions::Gate::Wait(owners, text) => {
                         // Never wait for an owner that is itself waiting for us.
                         let waitable: BTreeSet<String> =
-                            owners.iter().filter(|o| !st.waits_for(o, agent)).cloned().collect();
+                            owners.iter().filter(|o| st.may_wait(agent, o)).cloned().collect();
                         if !waitable.is_empty() && Instant::now() < deadline {
                             st.waiting.insert(agent.to_owned(), waitable);
                             st.log("wait", json!({ "agent": agent, "for": owners, "reason": "region" }));
@@ -636,7 +646,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         if !running.is_empty() {
             // Never wait for a producer that is itself waiting for us: adapt to
             // the contract as published instead (below).
-            let waitable: BTreeSet<String> = running.iter().filter(|p| !st.waits_for(p, agent)).cloned().collect();
+            let waitable: BTreeSet<String> = running.iter().filter(|p| st.may_wait(agent, p)).cloned().collect();
             if !waitable.is_empty() && Instant::now() < deadline {
                 st.log("wait", json!({ "agent": agent, "for": running }));
                 st.waiting.insert(agent.to_owned(), waitable);
