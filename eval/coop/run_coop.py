@@ -52,7 +52,7 @@ def main() -> int:
     ap.add_argument("--cache", required=True, type=Path)
     ap.add_argument("--concord", required=True)
     ap.add_argument("--pairs", required=True, help="comma-separated repo:task:f1:f2")
-    ap.add_argument("--modes", default="off,enforce,peer", help="off | observe | enforce | peer (enforce + --peer-merge) | peeronly (peer merge without the contract layer)")
+    ap.add_argument("--modes", default="off,enforce,peer", help="off | observe | enforce | peer (enforce + --peer-merge) | peeronly (peer merge without the contract layer) | regions (enforce + --regions: contracts plus region coherence, no peer merge)")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--budget-usd", default="0.75")
     ap.add_argument("--python", default="3.12")
@@ -116,9 +116,10 @@ def main() -> int:
             r = subprocess.run(
                 [
                     concord, "run", "--repo", str(repo), "--base", base, "--tasks", str(tasks_file),
-                    "--mode", "enforce" if mode in ("peer", "peeronly") else mode,
+                    "--mode", "enforce" if mode in ("peer", "peeronly", "regions") else mode,
                     *(["--peer-merge"] if mode in ("peer", "peeronly") else []),
                     *(["--no-contracts"] if mode == "peeronly" else []),
+                    *(["--regions"] if mode == "regions" else []),
                     "--model", args.model, "--budget-usd", args.budget_usd,
                     "--test-cmd", hidden, "--allow", f"Bash({test_cmd_bin} *)", "--allow", f"Bash({test_cmd_bin})",
                     "--out", str(run_out), "--max-wait-secs", "300",
