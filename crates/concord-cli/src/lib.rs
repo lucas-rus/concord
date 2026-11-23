@@ -1,6 +1,7 @@
 //! Library part of the `concord` CLI: branch analysis and protocol simulation.
 
 pub mod live;
+pub mod mcp;
 pub mod report;
 pub mod run;
 

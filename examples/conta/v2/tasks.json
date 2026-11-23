@@ -1,0 +1,50 @@
+[
+  {
+    "name": "doctype",
+    "prompt": "Ticket `doctype`: credit notes (storno invoices).\n\nSuppliers also send credit notes (\"factura storno\"), which reverse an earlier invoice. Invoices must say which kind of document they are.\n\n- Add a required field `doc_type: str` to `Invoice` in `src/conta/model.py`, declared right after `number` (no default). Its value is `\"factura\"` or `\"storno\"`.\n- `parse_invoice` reads the extracted key `tip`: `\"storno\"` (any letter case) gives `\"storno\"`; anything else, or a missing key, gives `\"factura\"`.\n- Update every place in the package and the tests that constructs an `Invoice`.\n\nAdd tests."
+  },
+  {
+    "name": "storno-audit",
+    "prompt": "Ticket `storno-audit`: audit credit notes correctly.\n\nCredit notes (invoices whose `doc_type` is `\"storno\"`) reverse an earlier invoice, so their quantities and amounts are negative. The audit currently flags these lines as implausible.\n\nIn the invoice audit (`src/conta/audit.py`), the `plausibility` dimension must treat a line of a storno invoice as plausible when its VAT rate is valid on the issue date, its quantity is <= 0 and its unit price is >= 0. Lines of normal invoices (`doc_type` `\"factura\"`) keep the current rule. Other dimensions are unchanged.\n\nAdd tests."
+  },
+  {
+    "name": "saga-storno",
+    "prompt": "Ticket `saga-storno`: mark credit notes in the SAGA export.\n\nSAGA needs to know whether an imported document is a normal invoice or a credit note. In `src/conta/export/saga.py`, add a `<FacturaTip>` element to `<Antet>`, right after `<FacturaNumar>`: `S` for storno invoices (`doc_type == \"storno\"`), `N` otherwise.\n\nAdd tests."
+  },
+  {
+    "name": "fx",
+    "prompt": "Ticket `fx`: convert foreign-currency invoices to RON.\n\nAccounting is kept in RON; invoices in EUR or USD must be converted with the BNR (National Bank of Romania) exchange rate.\n\nCreate `src/conta/fx.py` with:\n\n- `class RateTable` with a classmethod `from_csv(text: str) -> RateTable` reading lines `YYYY-MM-DD,CUR,RATE` (e.g. `2025-03-14,EUR,4.9750`; blank lines ignored), and a method `rate(currency: str, on: date) -> float` returning 1.0 for `RON`, otherwise the rate of the latest date on or before `on` (BNR does not publish on weekends); raise `KeyError` if there is none.\n- `to_ron(inv: Invoice, table: RateTable) -> Invoice`: a converted copy (the original is not modified) where every amount (line unit prices, line totals, line VAT amounts, net, VAT and gross totals) is multiplied by the rate of the invoice's currency on its issue date and rounded to 2 decimals, and `currency` is `\"RON\"`.\n\nAdd tests."
+  },
+  {
+    "name": "iban",
+    "prompt": "Ticket `iban`: bank accounts (IBAN).\n\n- Create `src/conta/iban.py` with a frozen dataclass `IbanCheck` (`normalized: str`, `valid: bool`, `bank: str`) and `check_iban(raw: str) -> IbanCheck`: remove spaces and uppercase; a Romanian IBAN is valid if it starts with `RO`, has 24 characters and passes the ISO 13616 mod-97 check (move the first 4 characters to the end, replace letters by numbers A=10 ... Z=35, the number mod 97 must be 1). `bank` is the 4-letter bank code (characters 5-8, e.g. `BTRL`) for valid IBANs, `\"\"` otherwise.\n- Add an optional field `iban: str = \"\"` (last) to `Party` in `src/conta/model.py`, and have the parser fill it from the extracted key `iban` of the supplier/customer (`furnizor`/`client`/`emitent`).\n\nAdd tests."
+  },
+  {
+    "name": "efactura-iban",
+    "prompt": "Ticket `efactura-iban`: payment account in e-Factura.\n\nBuyers pay by bank transfer, so the e-Factura XML must carry the supplier's bank account. In `src/conta/export/efactura.py`, when the supplier has a valid Romanian IBAN (extracted from the document's `furnizor.iban`; validate it with the ISO 13616 mod-97 check, spaces removed, uppercase), add to the root:\n\n`cac:PaymentMeans` with `cbc:PaymentMeansCode` = `42` and `cac:PayeeFinancialAccount/cbc:ID` = the IBAN without spaces.\n\nOmit `cac:PaymentMeans` when there is no valid IBAN.\n\nAdd tests."
+  },
+  {
+    "name": "report",
+    "prompt": "Ticket `report`: monthly summary for the accountant.\n\nCreate `src/conta/report.py` with `summarize(invoices: list[Invoice]) -> dict` returning:\n\n- `count`: number of invoices;\n- `net`, `vat`, `gross`: sums of the invoices' net, VAT and gross totals, rounded to 2 decimals;\n- `by_supplier`: dict from the supplier's normalized CUI (digits only, without `RO`, as given by `conta.cui.check_cui`) to the sum of that supplier's gross totals (rounded to 2 decimals);\n- `by_rate`: dict from VAT rate (float) to the summed net amount at that rate over all invoices (use `conta.vat.vat_breakdown`; rounded to 2 decimals);\n- `needs_review`: number of invoices whose audit (`conta.audit.audit`) says they need review.\n\nAdd tests."
+  },
+  {
+    "name": "cli-summary",
+    "prompt": "Ticket `cli-summary`: write the monthly summary from the CLI.\n\nAdd a `--summary` flag to `python -m conta process` and a matching keyword argument `summary: bool = False` to `conta.cli.process`. When set, besides the exports and `report.json`, write `OUT_DIR/summary.json` with the following summary of all processed invoices: `count`, `net`, `vat`, `gross` (sums, 2 decimals), `by_supplier` (supplier CUI without `RO` prefix -> gross sum) and `by_rate` (VAT rate as a string such as `\"19.0\"` -> net sum at that rate), plus `needs_review` (number of invoices needing review).\n\nAdd tests."
+  },
+  {
+    "name": "audit-policy",
+    "prompt": "Ticket `audit-policy`: configurable audit policy.\n\nClients want different review thresholds than the fixed 0.85 / strict 0.95. In `src/conta/audit.py`:\n\n- add a frozen dataclass `AuditPolicy` with a field `threshold: float = 0.85`, and module constants `DEFAULT = AuditPolicy()` and `STRICT = AuditPolicy(threshold=0.95)`;\n- change `audit` to `audit(doc, *, policy: AuditPolicy = DEFAULT) -> AuditResult`: `needs_review` is `score < policy.threshold`;\n- remove the `strict` parameter (use `policy=STRICT` instead), and update its uses in the package and in the tests.\n\nAdd tests."
+  },
+  {
+    "name": "cli-strict",
+    "prompt": "Ticket `cli-strict`: strict mode in the CLI.\n\nSome clients want the strict review threshold of the audit. Add a `--strict` flag to `python -m conta process` and a matching keyword argument `strict: bool = False` to `conta.cli.process`; when set, documents are audited in the audit's strict mode, so `needs_review` in `report.json` uses the strict threshold.\n\nAdd tests."
+  },
+  {
+    "name": "dedup",
+    "prompt": "Ticket `dedup`: detect duplicate invoices.\n\nThe same invoice is often uploaded twice (scanned and e-mailed). Create `src/conta/dedup.py` with `find_duplicates(invoices: dict[str, Invoice]) -> list[list[str]]`: two invoices are duplicates when their suppliers have the same normalized CUI (as given by `conta.cui.check_cui`, so `RO14399840` and `14399840` are equal) and their numbers are equal after stripping spaces and uppercasing. Return the groups of document ids with more than one member; ids sorted within a group, groups sorted by their first id.\n\nAdd tests."
+  },
+  {
+    "name": "review-reasons",
+    "prompt": "Ticket `review-reasons`: explain why a document needs review.\n\nReviewers see dimension names like `global_math` and don't know what they mean. In `src/conta/review.py`, add a field `reasons: list[str]` (last) to `ReviewItem`, with one human-readable message per issue, in the order of `issues`:\n\n- `completeness`: `missing required fields`\n- `line_math`: `line totals do not match quantity x price`\n- `global_math`: `line totals do not add up to the net total`\n- `cui`: `invalid fiscal code (CUI)`\n- `plausibility`: `implausible VAT rate or negative amounts`\n- `cross_reference`: `net + VAT does not equal the gross total`\n\nAdd tests."
+  }
+]

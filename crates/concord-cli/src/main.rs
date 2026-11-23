@@ -98,6 +98,24 @@ enum Command {
         /// Claude Code executable.
         #[arg(long, default_value = "claude")]
         claude: String,
+        /// Coding agent that runs the tasks: claude (Claude Code) or opencode.
+        #[arg(long, value_enum, default_value = "claude")]
+        agent_cli: run::AgentCli,
+        /// OpenCode executable (with --agent-cli opencode). The model is given
+        /// with --model in OpenCode's provider/model form, e.g. opencode/qwen4-max-free.
+        #[arg(long, default_value = "opencode")]
+        opencode: String,
+    },
+    /// Serve Concord as an MCP server on stdin/stdout, for MCP clients such as
+    /// OpenCode or Claude Code. Its tools start and follow coordinated agent teams
+    /// on the client's repository.
+    Mcp {
+        /// Coding agent for the team: opencode or claude.
+        #[arg(long, default_value = "opencode")]
+        agent_cli: String,
+        /// Default model for the team's agents.
+        #[arg(long, default_value = "opencode/qwen4-max-free")]
+        model: String,
     },
     /// Hook entry point (configured by `concord run`): forwards the hook input
     /// on stdin to the daemon and prints its answer.
@@ -187,6 +205,8 @@ fn main() -> Result<()> {
             no_contracts,
             resume_rounds,
             claude,
+            agent_cli,
+            opencode,
         } => {
             let tasks: Vec<Task> = serde_json::from_str(&std::fs::read_to_string(&tasks)?)?;
             let repo_root = Repo::open(&repo)?.root().to_path_buf();
@@ -205,11 +225,20 @@ fn main() -> Result<()> {
                 contracts: !no_contracts,
                 resume_rounds,
                 claude,
+                agent_cli,
+                opencode,
                 concord_exe: std::env::current_exe()?,
             };
             let r = run::run(&cfg)?;
             print!("{}", run::render(&r));
             eprintln!("run directory: {}", r.run_dir.display());
+        }
+        Command::Mcp { agent_cli, model } => {
+            concord_cli::mcp::serve(concord_cli::mcp::McpConfig {
+                agent_cli,
+                model,
+                concord_exe: std::env::current_exe()?,
+            })?;
         }
         Command::Hook { addr, agent, event } => {
             std::process::exit(live::hook_client(&addr, &agent, &event));

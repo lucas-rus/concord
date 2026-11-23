@@ -37,8 +37,29 @@ pub struct RunConfig {
     pub contracts: bool,
     pub resume_rounds: u32,
     pub claude: String,
+    /// Which coding agent runs the tasks.
+    pub agent_cli: AgentCli,
+    /// OpenCode executable (for `AgentCli::Opencode`).
+    pub opencode: String,
     pub concord_exe: PathBuf,
 }
+
+/// The coding agent that `concord run` drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCli {
+    /// Claude Code (`claude -p`), coordinated through its hooks.
+    Claude,
+    /// OpenCode (`opencode run`), coordinated through a plugin plus a
+    /// controller loop that implements the finish gate.
+    Opencode,
+}
+
+const OPENCODE_PLUGIN: &str = include_str!("opencode_plugin.js");
+/// A turn producing no output for this long is considered hung.
+const OPENCODE_IDLE: Duration = Duration::from_secs(300);
+/// Upper bound on turns (first prompt plus gate continuations) per agent.
+const OPENCODE_MAX_TURNS: u32 = 10;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AgentResult {
@@ -132,22 +153,47 @@ fn settings_json(cfg: &RunConfig, addr: &str, agent: &str) -> Value {
 
 struct Running {
     name: String,
-    child: Child,
+    proc: Proc,
     started: Instant,
     out: PathBuf,
+}
+
+/// An agent is either a child process (Claude Code) or a controller thread
+/// driving OpenCode turn by turn.
+enum Proc {
+    Child(Child),
+    Thread(std::thread::JoinHandle<()>),
+}
+
+impl Proc {
+    fn finished(&mut self) -> Result<bool> {
+        Ok(match self {
+            Proc::Child(c) => c.try_wait()?.is_some(),
+            Proc::Thread(h) => h.is_finished(),
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_agent(
     cfg: &RunConfig,
-    name: &str,
-    worktree: &Path,
-    settings: &Path,
+    agent: AgentCtx<'_>,
     prompt: &str,
     session: SessionArg<'_>,
     out_dir: &Path,
     attempt: u32,
 ) -> Result<Running> {
+    let AgentCtx {
+        name,
+        worktree,
+        settings,
+        shared,
+        addr,
+    } = agent;
+    if cfg.agent_cli == AgentCli::Opencode {
+        return spawn_opencode(cfg, agent, prompt, session, out_dir, attempt);
+    }
+    let _ = (shared, addr);
     let out = out_dir.join(format!("{name}.{attempt}.json"));
     let err = out_dir.join(format!("{name}.{attempt}.err"));
     let mut note = COMMON_NOTE.to_owned();
@@ -191,10 +237,214 @@ fn spawn_agent(
         .with_context(|| format!("starting {} for agent {name}", cfg.claude))?;
     Ok(Running {
         name: name.to_owned(),
-        child,
+        proc: Proc::Child(child),
         started: Instant::now(),
         out,
     })
+}
+
+/// Everything about one agent that spawning it needs.
+#[derive(Clone, Copy)]
+struct AgentCtx<'a> {
+    name: &'a str,
+    worktree: &'a Path,
+    settings: &'a Path,
+    shared: &'a Shared,
+    addr: &'a str,
+}
+
+/// Start an OpenCode agent: a controller thread runs `opencode run` and, each
+/// time the agent stops, asks Concord's finish gate (the equivalent of Claude
+/// Code's Stop hook). A block continues the session with the gate's reason.
+fn spawn_opencode(
+    cfg: &RunConfig,
+    agent: AgentCtx<'_>,
+    prompt: &str,
+    session: SessionArg<'_>,
+    out_dir: &Path,
+    attempt: u32,
+) -> Result<Running> {
+    let name = agent.name.to_owned();
+    let out = out_dir.join(format!("{name}.{attempt}.json"));
+    // Per-agent OpenCode config directory with the plugin and its settings.
+    let cfg_dir = out_dir.join(format!("{name}.opencode"));
+    std::fs::create_dir_all(cfg_dir.join("plugin"))?;
+    let plugin = cfg_dir.join("plugin").join("concord.js");
+    if std::fs::read_to_string(&plugin).ok().as_deref() != Some(OPENCODE_PLUGIN) {
+        std::fs::write(&plugin, OPENCODE_PLUGIN)?;
+    }
+    std::fs::write(
+        cfg_dir.join("concord.json"),
+        serde_json::to_string_pretty(&json!({
+            "enabled": cfg.mode != Mode::Off,
+            "exe": cfg.concord_exe,
+            "addr": agent.addr,
+            "agent": name,
+            "worktree": agent.worktree,
+        }))?,
+    )?;
+    let first = match session {
+        SessionArg::New(_) => {
+            let mut note = COMMON_NOTE.to_owned();
+            if cfg.mode == Mode::Enforce {
+                note.push(' ');
+                note.push_str(ENFORCE_NOTE);
+            }
+            format!("{note}\n\n{prompt}")
+        }
+        SessionArg::Resume(_) => prompt.to_owned(),
+    };
+    let resume = match session {
+        SessionArg::Resume(id) => Some(id.to_owned()),
+        SessionArg::New(_) => None,
+    };
+    let job = OpencodeJob {
+        exe: cfg.opencode.clone(),
+        model: cfg.model.clone(),
+        gate: cfg.mode == Mode::Enforce,
+        cfg_dir,
+        worktree: agent.worktree.to_path_buf(),
+        shared: agent.shared.clone(),
+        name: name.clone(),
+        out: out.clone(),
+        log_prefix: out_dir.join(format!("{name}.{attempt}")),
+    };
+    let handle = std::thread::spawn(move || job.run(first, resume));
+    Ok(Running {
+        name,
+        proc: Proc::Thread(handle),
+        started: Instant::now(),
+        out,
+    })
+}
+
+struct OpencodeJob {
+    exe: String,
+    model: String,
+    gate: bool,
+    cfg_dir: PathBuf,
+    worktree: PathBuf,
+    shared: Shared,
+    name: String,
+    out: PathBuf,
+    log_prefix: PathBuf,
+}
+
+impl OpencodeJob {
+    fn run(self, first: String, mut session: Option<String>) {
+        let mut message = first;
+        let mut turns = 0u32;
+        let mut cost = 0.0f64;
+        let mut last_text = String::new();
+        let mut error = false;
+        while turns < OPENCODE_MAX_TURNS {
+            turns += 1;
+            let (sid, text, c, ok) = self.turn(turns, &message, session.as_deref());
+            cost += c;
+            if sid.is_some() {
+                session = sid;
+            }
+            if !text.is_empty() {
+                last_text = text;
+            }
+            if !ok {
+                error = true;
+            }
+            if !self.gate {
+                break;
+            }
+            // The agent stopped: ask the finish gate, as Claude Code's Stop hook would.
+            let input = json!({ "session_id": session.clone().unwrap_or_default(), "hook_event_name": "Stop" });
+            let (stdout, _) = live::handle(&self.shared, &self.name, "Stop", &input);
+            let decision: Value = serde_json::from_str(&stdout).unwrap_or(Value::Null);
+            match decision.get("decision").and_then(Value::as_str) {
+                Some("block") if session.is_some() => {
+                    message = decision.get("reason").and_then(Value::as_str).unwrap_or("").to_owned();
+                }
+                _ => break,
+            }
+        }
+        let summary = json!({
+            "session_id": session.unwrap_or_default(),
+            "total_cost_usd": cost,
+            "num_turns": turns,
+            "result": last_text,
+            "is_error": error,
+        });
+        let _ = std::fs::write(&self.out, summary.to_string());
+    }
+
+    /// One `opencode run` invocation. Returns (session id, final text, cost, ok).
+    fn turn(&self, n: u32, message: &str, session: Option<&str>) -> (Option<String>, String, f64, bool) {
+        let log = PathBuf::from(format!("{}.turn{n}.jsonl", self.log_prefix.display()));
+        let err = PathBuf::from(format!("{}.turn{n}.err", self.log_prefix.display()));
+        let (Ok(out_f), Ok(err_f)) = (std::fs::File::create(&log), std::fs::File::create(&err)) else {
+            return (None, String::new(), 0.0, false);
+        };
+        let mut cmd = Command::new(&self.exe);
+        cmd.current_dir(&self.worktree)
+            .env("OPENCODE_CONFIG_DIR", &self.cfg_dir)
+            .args(["run", "--standalone", "--auto", "--format", "json", "-m", &self.model]);
+        if let Some(s) = session {
+            cmd.args(["--session", s]);
+        }
+        cmd.arg(message).stdin(Stdio::null()).stdout(out_f).stderr(err_f);
+        let Ok(mut child) = cmd.spawn() else {
+            return (None, String::new(), 0.0, false);
+        };
+        // Watchdog: kill a turn that produces no output for OPENCODE_IDLE.
+        let mut last_len = 0u64;
+        let mut last_change = Instant::now();
+        let ok = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Ok(None) => {}
+                Err(_) => break false,
+            }
+            let len = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+            if len != last_len {
+                last_len = len;
+                last_change = Instant::now();
+            } else if last_change.elapsed() > OPENCODE_IDLE {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        let (sid, text, cost) = parse_opencode_events(&std::fs::read_to_string(&log).unwrap_or_default());
+        (sid.or_else(|| session.map(str::to_owned)), text, cost, ok)
+    }
+}
+
+/// Extract the session id, the agent's last text and the total cost from
+/// `opencode run --format json` output (one JSON event per line).
+fn parse_opencode_events(jsonl: &str) -> (Option<String>, String, f64) {
+    let mut sid = None;
+    let mut text = String::new();
+    let mut cost = 0.0;
+    for line in jsonl.lines() {
+        let Ok(e) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let part = e.get("part").unwrap_or(&Value::Null);
+        if let Some(s) = e
+            .get("sessionID")
+            .or_else(|| part.get("sessionID"))
+            .and_then(Value::as_str)
+        {
+            sid = Some(s.to_owned());
+        }
+        if e.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(t) = part.get("text").and_then(Value::as_str)
+        {
+            text = t.to_owned();
+        }
+        if let Some(c) = part.get("cost").and_then(Value::as_f64) {
+            cost += c;
+        }
+    }
+    (sid, text, cost)
 }
 
 enum SessionArg<'a> {
@@ -210,7 +460,7 @@ fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>) 
     while !pending.is_empty() {
         let mut still = Vec::new();
         for mut r in pending {
-            if r.child.try_wait()?.is_some() {
+            if r.proc.finished()? {
                 let secs = r.started.elapsed().as_secs_f64();
                 done.push((r, secs));
             } else {
@@ -323,9 +573,13 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         let sid = uuid_v4();
         running.push(spawn_agent(
             cfg,
-            &t.name,
-            &worktrees[&t.name],
-            &settings,
+            AgentCtx {
+                name: &t.name,
+                worktree: &worktrees[&t.name],
+                settings: &settings,
+                shared: &shared,
+                addr: &addr,
+            },
             &t.prompt,
             SessionArg::New(&sid),
             &agents_dir,
@@ -366,9 +620,13 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
                 eprintln!("  resuming agent {n} (round {round})");
                 running.push(spawn_agent(
                     cfg,
-                    n,
-                    &worktrees[n],
-                    &settings_paths[n],
+                    AgentCtx {
+                        name: n,
+                        worktree: &worktrees[n],
+                        settings: &settings_paths[n],
+                        shared: &shared,
+                        addr: &addr,
+                    },
                     msg,
                     SessionArg::Resume(sid),
                     &agents_dir,

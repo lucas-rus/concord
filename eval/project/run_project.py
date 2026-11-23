@@ -30,9 +30,19 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCAFFOLD = ROOT / "examples" / "conta" / "scaffold"
-MILESTONES = ROOT / "examples" / "conta" / "milestones"
 HIDDEN = ROOT / "eval" / "project" / "hidden"
+# project -> (scaffold, [(milestone tasks file, hidden test file)])
+PROJECTS = {
+    "conta": (
+        ROOT / "examples" / "conta" / "scaffold",
+        [(ROOT / "examples" / "conta" / "milestones" / f"m{m}.json", HIDDEN / f"test_m{m}.py") for m in (1, 2, 3)],
+    ),
+    # The v2 sprint: 12 parallel tickets on top of the finished conta v1.
+    "v2": (
+        ROOT / "examples" / "conta" / "v2" / "base",
+        [(ROOT / "examples" / "conta" / "v2" / "tasks.json", HIDDEN / "test_v2.py")],
+    ),
+}
 GIT_ID = ["-c", "user.name=concord-eval", "-c", "user.email=concord-eval@localhost"]
 
 
@@ -63,6 +73,8 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--first-run", type=int, default=1)
     ap.add_argument("--python", required=True, help="interpreter with pytest installed")
+    ap.add_argument("--project", choices=sorted(PROJECTS), default="conta")
+    ap.add_argument("--agent-cli", choices=["claude", "opencode"], default="claude")
     ap.add_argument("--model", default="claude-haiku-5-5")
     ap.add_argument("--budget-usd", default="0.75")
     ap.add_argument("--out", required=True, type=Path)
@@ -85,13 +97,14 @@ def main() -> int:
             if work.exists():
                 shutil.rmtree(work)
             repo = work / "repo"
-            shutil.copytree(SCAFFOLD, repo)
+            scaffold, milestones = PROJECTS[args.project]
+            shutil.copytree(scaffold, repo, ignore=shutil.ignore_patterns("__pycache__"))
             git(["init", "-q", "-b", "main"], repo)
             git(["add", "-A"], repo)
             git(["commit", "-q", "-m", "scaffold"], repo)
             base = git(["rev-parse", "HEAD"], repo)
-            for m in (1, 2, 3):
-                tasks = json.loads((MILESTONES / f"m{m}.json").read_text())
+            for m, (tasks_path, hidden_file) in enumerate(milestones, 1):
+                tasks = json.loads(tasks_path.read_text())
                 for t in tasks:
                     t["prompt"] += (
                         f"\n\nThe package is in `src/conta`. Run the test suite with `{tester} -q tests` "
@@ -100,15 +113,16 @@ def main() -> int:
                 tasks_file = work / f"m{m}.tasks.json"
                 tasks_file.write_text(json.dumps(tasks, indent=2))
                 hidden = (
-                    f'PYTHONPATH="$PWD/src" "{args.python}" -m pytest -q --tb=line -p no:cacheprovider '
-                    f"--rootdir {HIDDEN} {HIDDEN / f'test_m{m}.py'}"
+                    f'PYTHONPATH="$PWD/src" "{args.python}" -m pytest -q -rA --tb=no -p no:cacheprovider '
+                    f"--rootdir {HIDDEN} {hidden_file}"
                 )
                 out = work / f"m{m}"
                 print(f"run{run} [{mode}] milestone {m} ...", file=sys.stderr, flush=True)
                 r = subprocess.run(
                     [
                         concord, "run", "--repo", str(repo), "--base", base, "--tasks", str(tasks_file),
-                        *mode_flags(mode), "--model", args.model, "--budget-usd", args.budget_usd,
+                        *mode_flags(mode), "--agent-cli", args.agent_cli, "--model", args.model,
+                        "--budget-usd", args.budget_usd,
                         "--test-cmd", hidden, "--allow", f"Bash({tester} *)", "--allow", f"Bash({tester})",
                         "--out", str(out), "--max-wait-secs", "300",
                     ],
@@ -136,6 +150,15 @@ def main() -> int:
                     "gate_blocks": sum(a["gate_blocks"] for a in rep["agents"]),
                     "merges": sum(len(a["merges"]) for a in rep["agents"]),
                     "resumed": sum(a.get("resumed", 0) for a in rep["agents"]),
+                    "agent_cli": args.agent_cli,
+                    "model": args.model,
+                    "project": args.project,
+                    "agents": len(rep["agents"]),
+                    "agent_errors": sum(bool(a.get("is_error")) for a in rep["agents"]),
+                    "tests": dict(
+                        (name.split("::")[-1], status == "PASSED")
+                        for status, name in re.findall(r"^(PASSED|FAILED|ERROR) (\S+)", rep["integration"]["tests_output_tail"], re.M)
+                    ),
                 }
                 print(
                     f"  -> hidden {passed} passed / {failed} failed, conflict={row['merge_conflict']}, "

@@ -1,0 +1,8 @@
+[project]
+name = "conta"
+version = "0.1.0"
+description = "Offline processing of Romanian fiscal documents: parse, audit, export"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
