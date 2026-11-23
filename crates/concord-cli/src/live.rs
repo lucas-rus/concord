@@ -336,7 +336,27 @@ impl State {
     /// published contract (empty = conforms).
     fn conformance(&self, agent: &str, symbol: &SymbolId) -> Vec<String> {
         let id = AgentId::new(agent);
-        let uses = self.dir.uses_of(&id, symbol);
+        let mut uses = self.dir.uses_of(&id, symbol);
+        if uses.is_empty() {
+            return vec![];
+        }
+        // Only call sites the agent wrote are its obligation. A use whose text
+        // is already in the agent's base is pre-existing code: adapting it is
+        // the job of the agent that changed the definition (as in any
+        // refactoring), and blocking a bystander on it cannot make progress.
+        let base = self.agents[agent].base.clone();
+        let paths: Vec<String> = uses
+            .iter()
+            .map(|u| u.path.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if let Ok(files) = self.repo.read_files(&base, &paths) {
+            uses.retain(|u| {
+                let t = u.text.trim();
+                t.is_empty() || !files.get(&u.path).is_some_and(|f| f.contains(t))
+            });
+        }
         if uses.is_empty() {
             return vec![];
         }

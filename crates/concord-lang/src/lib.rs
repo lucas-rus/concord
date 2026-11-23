@@ -181,6 +181,12 @@ impl RepoIndex {
             }
         }
 
+        // A receiver bound by an import that did not resolve above is a
+        // module outside the repository (`import re; re.match(...)`): never
+        // guess a repository method for it.
+        if file.imports.iter().any(|b| &b.local == head) {
+            return None;
+        }
         if r.is_call && !rest.is_empty() {
             let name = r.chain.last()?;
             if let Some(c) = self.callables_by_name.get(name)
@@ -301,6 +307,26 @@ mod tests {
         let uses = r.uses_from(&from, &BTreeSet::new());
         assert!(uses.contains_key(&SymbolId::new("shop.cart.Cart.check")));
         assert!(uses.contains_key(&SymbolId::new("shop.cart.Cart.add")));
+    }
+
+    #[test]
+    fn calls_on_external_modules_are_not_unique_name_matches() {
+        let ix = idx(&[
+            (
+                "p/parser.py",
+                "class InlineParser:\n    def match(self, s):\n        return s\n",
+            ),
+            (
+                "p/blocks.py",
+                "import re\n\ndef f(start, s):\n    return re.match(start, s)\n\ndef g(p, s):\n    return p.match(s)\n",
+            ),
+        ]);
+        let from: BTreeSet<SymbolId> = [SymbolId::new("p.blocks.f"), SymbolId::new("p.blocks.g")].into();
+        let uses = ix.uses_from(&from, &BTreeSet::new());
+        let sites = &uses[&SymbolId::new("p.parser.InlineParser.match")];
+        // Only `p.match(s)` (unknown receiver) is a candidate, not `re.match`.
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert!(sites[0].text.contains("p.match"));
     }
 
     #[test]
