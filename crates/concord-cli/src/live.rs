@@ -103,6 +103,9 @@ pub struct State {
     /// Before finishing, merge finished peers whose work conflicts textually
     /// with the agent's, so the agent resolves the conflicts itself.
     pub peer_merge: bool,
+    /// Contract layer (notices, contract finish gate, resumes). Off = peer merge
+    /// only (ablation).
+    pub contracts: bool,
     revisions: HashMap<String, Arc<Snapshot>>,
     log: Option<std::fs::File>,
     started: Instant,
@@ -130,6 +133,7 @@ impl State {
             agents: BTreeMap::new(),
             max_wait,
             peer_merge: false,
+            contracts: true,
             revisions: HashMap::new(),
             log,
             started: Instant::now(),
@@ -372,6 +376,9 @@ impl State {
     }
 
     pub fn needs_resume(&mut self, agent: &str) -> Option<String> {
+        if !self.contracts {
+            return None;
+        }
         let remaining = self.auto_ack(agent);
         if remaining.is_empty() {
             return None;
@@ -419,7 +426,7 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         }
         _ => {}
     }
-    if st.mode != Mode::Enforce {
+    if st.mode != Mode::Enforce || !st.contracts {
         return (String::new(), 0);
     }
     match st.render_outbox(agent) {
@@ -477,9 +484,14 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             finish(&mut st, agent);
             return (String::new(), 0);
         }
-        let remaining = st.auto_ack(agent);
-        let gate = st.dir.finish_gate(&AgentId::new(agent));
-        if remaining.is_empty() && gate.is_open() {
+        let (remaining, gate_open) = if st.contracts {
+            let remaining = st.auto_ack(agent);
+            let open = st.dir.finish_gate(&AgentId::new(agent)).is_open();
+            (remaining, open)
+        } else {
+            (BTreeMap::new(), true)
+        };
+        if remaining.is_empty() && gate_open {
             if st.peer_merge
                 && let Some(reason) = integrate_peers(&mut st, agent)
             {

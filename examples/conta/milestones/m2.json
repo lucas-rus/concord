@@ -1,0 +1,14 @@
+[
+  {
+    "name": "vat",
+    "prompt": "Milestone 2, task `vat`: date-aware VAT rates and VAT breakdown.\n\nRomania changed its VAT rates on 1 August 2025: before that date the valid rates are 0, 5, 9 and 19 percent; from 1 August 2025 they are 0, 11 and 21 percent.\n\n- Create `src/conta/vat.py` with `valid_rates(on: date) -> frozenset[float]` implementing the rule above.\n- In the same module add a frozen dataclass `VatGroup` with fields `net: float` and `vat: float`, and `vat_breakdown(inv: Invoice) -> dict[float, VatGroup]` that groups the invoice lines by `vat_rate`: `net` is the sum of the line totals, `vat` is `round(net * rate / 100, 2)`.\n- The invoice audit's `plausibility` dimension (in `src/conta/audit.py`) must use the rates valid on the invoice's issue date instead of the fixed set.\n\nAdd tests."
+  },
+  {
+    "name": "lines",
+    "prompt": "Milestone 2, task `lines`: line items carry their VAT amount.\n\nAccountants need the VAT of each line, not only the rate.\n\n- Add a required field `vat_amount: float` to `LineItem` in `src/conta/model.py`, declared after `total` (it has no default).\n- `parse_invoice` (in `src/conta/parse.py`) fills it from the extracted key `valoare_tva` when present, else computes `round(total * vat_rate / 100, 2)`.\n- The SAGA export (`src/conta/export/saga.py`) emits a `<TVA>` element (2 decimals) in each `<Linie>`, after `<CotaTVA>`, and the header (`<Antet>`) gets `<TotalFaraTVA>`, `<TotalTVA>` and `<Total>` (net, VAT and gross totals of the invoice, 2 decimals).\n- Update every place that constructs a `LineItem` (package and tests).\n\nAdd tests."
+  },
+  {
+    "name": "receipts",
+    "prompt": "Milestone 2, task `receipts`: fiscal receipts (bon fiscal).\n\nBesides invoices, clients upload fiscal receipts. Extracted receipts look like: `{\"nr_bon\": \"0042\", \"data\": \"02.09.2025\", \"emitent\": {\"denumire\": \"...\", \"cui\": \"RO14399840\"}, \"produse\": [{\"denumire\": \"Paine\", \"cantitate\": \"2\", \"pret_unitar\": \"4,50\", \"cota_tva\": \"11\", \"valoare\": \"9,00\"}], \"total\": \"9,99\", \"plata\": \"card\"}` (the receipt total includes VAT).\n\n- Create `src/conta/receipt.py` with a dataclass `Receipt`: `number: str`, `issue_date: date`, `supplier: Party`, `lines: list[LineItem]`, `total: float`, `payment: str` (`\"numerar\"` or `\"card\"`, lowercase).\n- Add `parse_receipt(data: dict) -> Receipt` to `src/conta/parse.py`, reusing `LineItem` for the products.\n- Add `audit_receipt(r: Receipt) -> AuditResult` to `src/conta/audit.py` with dimensions `completeness` (fraction of number, issue date, supplier name, supplier CUI present), `line_math`, `cui` (the supplier only) and `plausibility` defined as for invoices, weighted 0.25, 0.35, 0.25 and 0.15; `score`, `needs_review` and `issues` as for invoices.\n\nAdd tests."
+  }
+]

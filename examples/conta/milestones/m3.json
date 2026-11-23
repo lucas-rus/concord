@@ -1,0 +1,14 @@
+[
+  {
+    "name": "unify",
+    "prompt": "Milestone 3, task `unify`: one audit entry point.\n\nIn `src/conta/audit.py`, replace `audit_invoice(inv)` and `audit_receipt(r)` by a single `audit(doc: Invoice | Receipt, *, strict: bool = False) -> AuditResult` that dispatches on the document type. In strict mode the review threshold is 0.95 instead of 0.85 (`needs_review` is `score < 0.95`); the score itself does not change. Remove `audit_invoice` and `audit_receipt` and update their uses in the package and in the tests.\n\nAdd tests."
+  },
+  {
+    "name": "review",
+    "prompt": "Milestone 3, task `review`: human review queue.\n\nCreate `src/conta/review.py` with:\n\n- a dataclass `ReviewItem` with fields `doc_id: str`, `score: float`, `issues: list[str]`, `priority: str`;\n- `review_queue(docs: dict[str, Invoice | Receipt]) -> list[ReviewItem]`: audit every document (with the package's audit functions), keep only those that need review, and return them sorted by score ascending, then by `doc_id`. `priority` is `\"high\"` if the score is below 0.6, `\"medium\"` below 0.75, `\"low\"` otherwise.\n\nAdd tests."
+  },
+  {
+    "name": "cli",
+    "prompt": "Milestone 3, task `cli`: command-line batch processing.\n\nCreate `src/conta/__main__.py` so that `python -m conta process IN_DIR OUT_DIR [--format saga|efactura]` (default `saga`) processes every `*.json` file in IN_DIR (extracted invoices, as accepted by `parse_invoice`):\n\n- parse and audit each invoice (with the package's audit functions);\n- write the export to `OUT_DIR/<stem>.xml` (SAGA or e-Factura); if the e-Factura export raises `ExportError`, skip the XML for that document;\n- write `OUT_DIR/report.json`: a JSON list, sorted by file name, of objects `{\"file\": \"<name>.json\", \"score\": <float>, \"needs_review\": <bool>, \"exported\": <bool>}`;\n- exit with status 0.\n\nExpose the same logic as `process(in_dir: Path, out_dir: Path, fmt: str = \"saga\") -> list[dict]` in `src/conta/cli.py` (returning the report entries); `__main__.py` only parses arguments and calls it.\n\nAdd tests."
+  }
+]

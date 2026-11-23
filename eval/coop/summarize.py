@@ -22,7 +22,7 @@ from itertools import combinations
 from math import comb
 from pathlib import Path
 
-MODES = ["off", "enforce", "peer"]
+MODES = ["off", "enforce", "peeronly", "peer"]
 
 
 def mcnemar_exact(b: int, c: int) -> float:

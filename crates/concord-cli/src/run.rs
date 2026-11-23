@@ -33,6 +33,8 @@ pub struct RunConfig {
     pub out_dir: PathBuf,
     pub max_wait: Duration,
     pub peer_merge: bool,
+    /// Contract layer on (default). Off with peer_merge = peer-merge-only ablation.
+    pub contracts: bool,
     pub resume_rounds: u32,
     pub claude: String,
     pub concord_exe: PathBuf,
@@ -300,6 +302,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         worktrees.insert(t.name.clone(), wt);
     }
     state.peer_merge = cfg.peer_merge;
+    state.contracts = cfg.contracts;
     let shared: Shared = Arc::new(Mutex::new(state));
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?.to_string();

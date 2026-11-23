@@ -1,0 +1,14 @@
+{
+  "numar": "FCT-1042",
+  "data": "14.03.2025",
+  "furnizor": {"denumire": "Dante International SA", "cui": "14399840", "adresa": "Bucuresti"},
+  "client": {"denumire": "Tehno Expert SRL", "cui": "18547290", "adresa": "Cluj-Napoca"},
+  "produse": [
+    {"denumire": "Laptop", "cantitate": "1", "pret_unitar": "3.200,00", "cota_tva": "19", "valoare": "3.200,00"},
+    {"denumire": "Mouse", "cantitate": "2", "pret_unitar": "50,00", "cota_tva": "19", "valoare": "100,00"}
+  ],
+  "total_fara_tva": "3.300,00",
+  "total_tva": "627,00",
+  "total_plata": "3.927,00",
+  "moneda": "RON"
+}

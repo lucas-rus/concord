@@ -88,6 +88,10 @@ enum Command {
         /// so the finishing agent resolves the conflict (enforce mode).
         #[arg(long)]
         peer_merge: bool,
+        /// Disable the contract layer (no notices, no contract gate, no resumes).
+        /// With --peer-merge this is the peer-merge-only ablation.
+        #[arg(long)]
+        no_contracts: bool,
         /// Rounds of resuming agents that became stale after finishing.
         #[arg(long, default_value_t = 2)]
         resume_rounds: u32,
@@ -180,6 +184,7 @@ fn main() -> Result<()> {
             out,
             max_wait_secs,
             peer_merge,
+            no_contracts,
             resume_rounds,
             claude,
         } => {
@@ -197,6 +202,7 @@ fn main() -> Result<()> {
                 allowed_tools: allow,
                 max_wait: Duration::from_secs(max_wait_secs),
                 peer_merge,
+                contracts: !no_contracts,
                 resume_rounds,
                 claude,
                 concord_exe: std::env::current_exe()?,
