@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "concord": {
+      "command": "concord",
+      "args": ["mcp", "--agent-cli", "claude", "--model", "claude-haiku-5-5"]
+    }
+  }
+}

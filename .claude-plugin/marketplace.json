@@ -1,0 +1,14 @@
+{
+  "name": "lucas-rus-concord",
+  "description": "Concord: coordinate teams of parallel AI coding agents on one repository",
+  "owner": {
+    "name": "Lucas-Michael Rus-Gheorghiu"
+  },
+  "plugins": [
+    {
+      "name": "concord",
+      "source": "./plugins/concord",
+      "description": "Run a team of parallel coding agents on your repository, coordinated by Concord (contract notices, finish gate, peer merge), and get one integrated branch"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "concord",
+  "version": "0.1.0",
+  "description": "Run a team of parallel coding agents on your repository, coordinated by Concord (contract notices, finish gate, peer merge), and get one integrated branch. Requires the `concord` binary on your PATH.",
+  "author": {
+    "name": "Lucas-Michael Rus-Gheorghiu"
+  },
+  "homepage": "https://github.com/lucas-rus/concord",
+  "repository": "https://github.com/lucas-rus/concord",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["multi-agent", "parallel agents", "merge conflicts", "coordination", "mcp"]
+}

@@ -5,9 +5,9 @@
 [![CI](https://github.com/lucas-rus/concord/actions/workflows/ci.yml/badge.svg)](https://github.com/lucas-rus/concord/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenHands, ...) **at the same time on the same repository** without them silently breaking each other's work. It is the subject of a Bachelor thesis at the Faculty of Computer Science, West University of Timișoara (supervisor: Dr. Adrian Spătaru).
+Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work. It is the subject of a Bachelor thesis at the Faculty of Computer Science, West University of Timișoara (supervisor: Dr. Adrian Spătaru).
 
-> **Status:** early research prototype. Working: the symbol/contract engine, the coherence protocol, the offline analyzer, and live coordination of real Claude Code agents (`concord run`). Next: precise type-checker-backed resolution, speculative integration and the CooperBench evaluation. See the [roadmap](docs/roadmap.md).
+> **Status:** research prototype, usable. Working: the symbol/contract engine, the coherence protocol, the offline analyzer, live coordination of real agents (`concord run`, with Claude Code or OpenCode), peer merge, and an MCP server so your own agent can start and follow coordinated teams. See the [roadmap](docs/roadmap.md).
 
 ## The problem
 
@@ -39,7 +39,42 @@ Files are the wrong unit of coordination. Agents break each other through **cont
 3. **Precise notices + finish gate.** When a contract changes, Concord sends a short, generated notice only to the agents whose footprint depends on it. The notice has the old and new contract and the recipient's exact call sites. An agent cannot finish while it depends on a stale contract.
 4. **Speculative integration.** In the background, all branches are merged in memory, type-checked, and the affected tests are run, to catch whatever the contract model misses.
 
-## Try it (works today)
+## Install and use it from your agent (MCP)
+
+Concord runs locally, next to your repository, as an [MCP](https://modelcontextprotocol.io) server. Your coding agent (OpenCode, Claude Code, any MCP client) gets tools to start a **team of parallel agents** on the repository, follow it, and fetch one integrated branch; you just ask it in plain language ("split this into parallel tickets and run them with Concord").
+
+**1. Install the binary** (macOS, Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh   # to ~/.local/bin
+# or from source:
+cargo install --git https://github.com/lucas-rus/concord concord-cli
+```
+
+**2. Connect it.**
+
+OpenCode (`~/.config/opencode/opencode.jsonc`):
+
+```jsonc
+"mcp": {
+  "concord": {
+    "type": "local",
+    "command": ["concord", "mcp", "--agent-cli", "opencode", "--model", "opencode/qwen4-max-free"],
+    "enabled": true
+  }
+}
+```
+
+Claude Code (plugin with the MCP server and a `concord-team` skill):
+
+```text
+/plugin marketplace add lucas-rus/concord
+/plugin install concord@lucas-rus-concord
+```
+
+**Tools:** `concord_run` (start a team: one agent and git worktree per ticket), `concord_status`, `concord_result` (report and integration branch), `concord_analyze` (check existing branches for conflicts and broken contracts), `concord_cancel`. The team's agents are Claude Code (`--agent-cli claude`) or OpenCode (`--agent-cli opencode`) with the model you choose.
+
+## Try it from the command line
 
 Requires Rust ≥ 1.90 and git ≥ 2.38.
 
@@ -90,17 +125,22 @@ concord diff old.py new.py               # contract vs. body changes between two
 concord analyze --base main b1 b2 --json # machine-readable output (for experiments)
 ```
 
-## First live results: real agents
+## Results with real agents
 
-`concord run` launches several Claude Code agents (Haiku) in parallel worktrees and coordinates them live through hooks. On the [shop scenario](eval/live/README.md), three agents work on three ordinary tickets:
-- one makes `currency` a required argument of `price_order`;
-- one writes new code that calls `price_order`;
-- one fixes a bug in the same file.
+**A small project built by a team.** Three Haiku agents build [`conta`](examples/conta) (an offline version of a Romanian invoice-processing pipeline) over three milestones, each split into three parallel tickets in which one agent changes an interface the others use. Hidden acceptance tests, validated against a reference solution, check the integrated result. 3 runs per condition ([eval/project](eval/project)):
 
-| | integrated tests pass |
-|---|---|
-| without Concord | **0 / 3** (each agent's tests pass alone; git merges cleanly; merged code crashes) |
-| with Concord | **3 / 3** (≈ $0.03 per run) |
+| | hidden tests passed (of 33) | milestones complete | merge conflicts |
+|---|---|---|---|
+| without Concord | 15.3 (46%) | 0 / 9 | 3 / 9 |
+| contract layer only | 24.0 (73%) | 3 / 9 | 3 / 9 |
+| peer merge only | 22.0 (67%) | 3 / 9 | 0 / 9 |
+| **Concord (both)** | **32.0 (97%)** | **7 / 9** | **0 / 9** |
+
+The two mechanisms fix different failures: the contract layer fixes interface changes (removed or changed functions other agents call), and peer merge fixes overlapping edits.
+
+**CooperBench pairs with agents.** 32 randomly sampled CooperBench feature pairs (jinja, click, dirty-equals, dspy), two Haiku agents each, judged by CooperBench's hidden tests ([eval/coop](eval/coop)): both features pass in **1/32** pairs without Concord and **13/32** with Concord (p = 0.0005, exact McNemar). Most CooperBench failures are overlapping edits, which peer merge resolves.
+
+**Shop scenario.** Three agents on ordinary tickets, one of which makes `currency` a required argument of `price_order` ([eval/live](eval/live/README.md)): integrated tests pass in **0/3** runs without Concord and **3/3** with it (Haiku, ≈ $0.03 per run). A first run with Qwen 4 Max through OpenCode also passes with Concord; the comparison without Concord is in progress.
 
 ## First results (RQ1, CooperBench gold patches)
 
