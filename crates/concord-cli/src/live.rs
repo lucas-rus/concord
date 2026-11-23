@@ -67,6 +67,8 @@ pub struct AgentStats {
     pub gate_blocks: u32,
     pub merges: Vec<String>,
     pub merge_conflicts: Vec<String>,
+    /// Region conflicts this agent was told to yield.
+    pub region_conflicts: u32,
 }
 
 #[derive(Debug)]
@@ -86,6 +88,12 @@ pub struct AgentInfo {
     pub pending_conflicts: Vec<String>,
     /// Peer whose merge is in progress (committed once conflicts are resolved).
     pub pending_peer: Option<(String, String)>,
+    /// Position in the task list; the lower rank owns contested regions.
+    pub rank: usize,
+    /// Latest snapshot commit of the worktree (region coherence).
+    pub snapshot: Option<String>,
+    /// Region notices waiting to be delivered.
+    pub region_notes: Vec<String>,
 }
 
 struct Snapshot {
@@ -106,6 +114,14 @@ pub struct State {
     /// Contract layer (notices, contract finish gate, resumes). Off = peer merge
     /// only (ablation).
     pub contracts: bool,
+    /// Region coherence: textual overlaps are detected after every edit and
+    /// resolved by the yielding agent (see `regions`).
+    pub regions: bool,
+    /// Region notices already sent: (yielder, owner, file).
+    pub(crate) region_alerted: BTreeSet<(String, String, String)>,
+    /// Pairs (yielder, owner) with a region yielded at some point: the owner's
+    /// finished work is handed over to the yielder.
+    pub(crate) region_yields: BTreeSet<(String, String)>,
     revisions: HashMap<String, Arc<Snapshot>>,
     log: Option<std::fs::File>,
     started: Instant,
@@ -134,6 +150,9 @@ impl State {
             max_wait,
             peer_merge: false,
             contracts: true,
+            regions: false,
+            region_alerted: BTreeSet::new(),
+            region_yields: BTreeSet::new(),
             revisions: HashMap::new(),
             log,
             started: Instant::now(),
@@ -141,6 +160,7 @@ impl State {
     }
 
     pub fn add_agent(&mut self, name: &str, worktree: PathBuf, branch: String, task: &str) {
+        let rank = self.agents.len();
         self.dir
             .register_agent(&AgentId::new(name), Some(first_line(task, 120)));
         self.agents.insert(
@@ -158,6 +178,9 @@ impl State {
                 stats: AgentStats::default(),
                 pending_conflicts: Vec::new(),
                 pending_peer: None,
+                rank,
+                snapshot: None,
+                region_notes: Vec::new(),
             },
         );
     }
@@ -226,6 +249,7 @@ impl State {
         if let Some(a) = self.agents.get_mut(agent) {
             a.index = Some(index);
             a.stats.footprint_refreshes += 1;
+            a.snapshot = Some(snap_commit);
         }
         self.route(notices);
         Ok(())
@@ -368,7 +392,9 @@ impl State {
             if matches!(n.kind, NoticeKind::ContractChanged { breaking: true, .. }) {
                 text.push_str(
                     "  note  : this change is in the other agent's branch, not yet in your worktree. Concord merges it \
-                     into your worktree before you finish, so you can then verify it in the code.\n",
+                     into your worktree before you finish, so you can then verify it in the code.\n  \
+                     action: update your own call sites to the new contract; do not edit the definition itself \
+                     (it belongs to the other agent, and editing it would conflict with their change).\n",
                 );
             }
         }
@@ -422,14 +448,27 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Bash" => {
             if let Err(e) = st.refresh(agent) {
                 st.log("error", json!({ "agent": agent, "error": e.to_string() }));
+            } else if st.regions && st.mode == Mode::Enforce {
+                crate::regions::after_edit(&mut st, agent);
             }
         }
         _ => {}
     }
-    if st.mode != Mode::Enforce || !st.contracts {
+    if st.mode != Mode::Enforce {
         return (String::new(), 0);
     }
-    match st.render_outbox(agent) {
+    let mut parts: Vec<String> = Vec::new();
+    if st.contracts
+        && let Some(t) = st.render_outbox(agent)
+    {
+        parts.push(t);
+    }
+    if st.regions
+        && let Some(a) = st.agents.get_mut(agent)
+    {
+        parts.append(&mut a.region_notes);
+    }
+    match (!parts.is_empty()).then(|| parts.join("\n")) {
         Some(text) => {
             st.log("deliver", json!({ "agent": agent, "via": "additionalContext" }));
             let out = json!({
@@ -509,6 +548,33 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             (BTreeMap::new(), true)
         };
         if remaining.is_empty() && gate_open {
+            if st.regions {
+                match crate::regions::gate(&mut st, agent) {
+                    crate::regions::Gate::Clear => {}
+                    crate::regions::Gate::Wait(owners, text) => {
+                        if Instant::now() < deadline {
+                            st.log("wait", json!({ "agent": agent, "for": owners, "reason": "region" }));
+                            drop(st);
+                            std::thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.stats.gate_blocks += 1;
+                        }
+                        st.log(
+                            "stop",
+                            json!({ "agent": agent, "decision": "block", "reason": "region_owner_running", "owners": owners }),
+                        );
+                        return (json!({ "decision": "block", "reason": text }).to_string(), 0);
+                    }
+                    crate::regions::Gate::Block(text) => {
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.stats.gate_blocks += 1;
+                        }
+                        return (json!({ "decision": "block", "reason": text }).to_string(), 0);
+                    }
+                }
+            }
             if st.peer_merge
                 && let Some(reason) = integrate_peers(&mut st, agent)
             {

@@ -2,7 +2,7 @@
 
 This file records what the papers in [`../bibliography/references.txt`](../bibliography/references.txt) say about Concord's design: mechanisms, numbers, and baselines. It is the working memory of the project. Read it before designing or changing a mechanism, a baseline or an experiment.
 
-Reviewed on 2026-11-23: sections 1, 2, 3, 6 and 7. Sections 4–5 are added when their review finishes. Numbers come from the full texts unless marked *(abstract only)*.
+Reviewed on 2026-11-23: all sections (1–7, 42 sources). Numbers come from the full texts unless marked *(abstract only)*.
 
 ## 0. Concord against its own proposal (audit, 2026-11-23)
 
@@ -140,3 +140,52 @@ Sources: clash @2ac931c, grove @0fce00c, mergiraf @0151074, gastown @94cc822, au
   - `asyncRewake` hooks: wake an agent with a warning between tool calls;
   - insertion-point arbitration for appends (end of module, class or list): the later agent takes a different anchor;
   - merge-semantics' `duplicate-definition` and `shared-registry-collision` checks.
+
+## 7. Foundations (sections 4–5)
+
+Full texts were read unless noted. WeCode: abstract only. Apel FSE'11: abstract plus the VaMoS'10 full text.
+
+- **Crystal** (Brun et al.; TSE 2013 extended version):
+  - speculative background merge, build and test of **committed** peer states, reported as relationships (SAME, AHEAD, BEHIND, TEXTUAL, BUILD, TEST) with guidance (who resolves, how easily);
+  - 16% of historical merges are textual conflicts; 33% of textually clean merges still break the build or tests;
+  - **93% of textual conflicts grow out of a clean state at a specific change**, and last 3.2 days on average;
+  - **so the cheap moment to act is the edit that creates the conflict**, not the finish.
+- **Palantír** (Sarma et al.):
+  - workspace awareness of **uncommitted** changes, split into direct conflicts (same artifact, file level) and indirect ones (signatures others depend on);
+  - with it, users found 31/39 indirect conflicts vs 5/39 without, and 12/14 direct conflicts vs 7/14; p<.05;
+  - some notifications were ignored, so **advice needs a gate behind it**;
+  - users' strategies (placeholders, soft locks via chat) are the informal versions of contract notices and region leases;
+  - **Concord has Palantír's indirect channel (contracts) but not the direct one**, and that missing channel is where 29 of 32 failures came from.
+- **WeCode** (abstract only):
+  - continuously merges uncommitted and committed changes, then compiles and tests them;
+  - reports only conflicts it has actually found (less noise than plain awareness);
+  - nobody's workspace is touched, which fits contracts-only; the closest prior design.
+- **Semistructured merge** (Apel et al.):
+  - order-independent elements (classes, methods, imports) are merged by name;
+  - same-place inserts of distinct declarations are *ordering* conflicts and are resolved;
+  - bodies are merged as text;
+  - conflicts went down in 60% of scenarios, by 34% on average;
+  - use it **both as a merge driver and as a classifier**: an overlap that structured merge resolves needs no lease and no notice.
+- **SAM** (Da Silva et al.):
+  - semantic interference = a test that passes on Left and fails on Base and on Merge;
+  - found 9 of 29 conflicts, with 3 false positives;
+  - for Concord: run each agent's own new tests on the speculative merge to get "fails together" notices; this is the next step once textual conflicts are fixed.
+- **Optimistic concurrency control** (Kung & Robinson):
+  - worktree = read phase, finish gate = validation, integration = write phase;
+  - **the gate checks read-set staleness only and is missing the write-write check (condition 3)**: write-set validation means a dry-run merge against finished peers must be clean;
+  - OCC is right only under low contention; CooperBench is high contention by design;
+  - starvation rule: after repeated failures, lock the region.
+- **Leases** (Gray & Cheriton):
+  - the writer waits for the holder's approval; short terms (10 s); coarse leases for "installed files";
+  - their caches are **write-through**, so a lease can expire safely. Worktrees are **write-back**: a modified region stays in the holder's branch until integration, so **a timeout cannot prevent a textual conflict**;
+  - a lease on modified text must last until integration; only intent-only leases may expire, and then in logical time.
+- **MESI** (Papamarcos & Patel):
+  - every write needs exclusive ownership, and there is no Shared-Modified state;
+  - exclusivity costs nothing when a line is not shared;
+  - **Concord's "Body never blocks" state is the departure from MESI that allows textual conflicts**;
+  - in Concord terms, a write miss on a modified region becomes one of: deny and redirect, hand over the holder's hunk text, or wait;
+  - regions must be tracked in base coordinates and re-anchored (the bug in Grove).
+- **CRDTs** (Shapiro et al.):
+  - a classifier for code constructs: top-level definitions, class members, imports, `__all__`, and keyed entries are **OR-Sets** (merge by union in a deterministic order);
+  - statement sequences, `elif` chains and parameter order are sequences and need coordination;
+  - deletion vs concurrent use is a design choice: make deletion a contract change.

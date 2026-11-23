@@ -47,6 +47,63 @@ pub struct MergeOutcome {
     pub conflicted_files: Vec<String>,
 }
 
+/// One change of a file between two revisions, in the coordinates of the
+/// old (base) side: lines `old_start .. old_start + old_count` were replaced
+/// by `new_lines`. `old_count == 0` is an insertion after line `old_start`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_lines: Vec<String>,
+}
+
+impl Hunk {
+    /// The part of the base this hunk occupies, as a closed interval of
+    /// "slots": line `n` is slot `2n`, the gap after line `n` is slot `2n + 1`.
+    /// An insertion occupies only its gap; a modification occupies its lines
+    /// and the gaps on both sides (git also conflicts on adjacent changes).
+    fn slots(&self) -> (u32, u32) {
+        if self.old_count == 0 {
+            (2 * self.old_start + 1, 2 * self.old_start + 1)
+        } else {
+            (2 * self.old_start - 1, 2 * (self.old_start + self.old_count - 1) + 1)
+        }
+    }
+
+    /// Whether git's three-way merge would see `self` and `other` (both
+    /// against the same base) as one conflicting region: they overlap or touch
+    /// without an unchanged base line between them, or insert at the same point.
+    pub fn collides(&self, other: &Hunk) -> bool {
+        let (a0, a1) = self.slots();
+        let (b0, b1) = other.slots();
+        a0 <= b1 && b0 <= a1
+    }
+}
+
+/// Parse `git diff -U0` output for one file.
+pub fn parse_hunks(diff: &str) -> Vec<Hunk> {
+    let mut hunks: Vec<Hunk> = Vec::new();
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@ -") {
+            let old = rest.split_whitespace().next().unwrap_or("0");
+            let mut it = old.split(',');
+            let start: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let count: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            hunks.push(Hunk {
+                old_start: start,
+                old_count: count,
+                new_lines: Vec::new(),
+            });
+        } else if let Some(added) = line.strip_prefix('+')
+            && !line.starts_with("+++")
+            && let Some(h) = hunks.last_mut()
+        {
+            h.new_lines.push(added.to_owned());
+        }
+    }
+    hunks
+}
+
 #[derive(Clone, Debug)]
 pub struct Repo {
     root: PathBuf,
@@ -279,6 +336,43 @@ impl Repo {
         }
     }
 
+    /// The hunks of `path` between `base` and `rev` (`git diff -U0`).
+    pub fn hunks(&self, base: &str, rev: &str, path: &str) -> Result<Vec<Hunk>> {
+        let diff = self.git(&["diff", "-U0", "--no-color", "--no-ext-diff", base, rev, "--", path])?;
+        Ok(parse_hunks(&diff))
+    }
+
+    /// Register a structured merge driver (e.g. Mergiraf) for the given file
+    /// patterns, repository-wide (`.git/config` and `.git/info/attributes`,
+    /// so it never shows up in agents' diffs). `git merge`, `git merge-tree`
+    /// and every linked worktree then use it.
+    pub fn set_merge_driver(&self, name: &str, command: &str, patterns: &[&str]) -> Result<()> {
+        self.git(&[
+            "config",
+            &format!("merge.{name}.name"),
+            &format!("{name} structured merge"),
+        ])?;
+        self.git(&["config", &format!("merge.{name}.driver"), command])?;
+        let common = self.git(&["rev-parse", "--git-common-dir"])?;
+        let common = self.root.join(common.trim());
+        let info = common.join("info");
+        std::fs::create_dir_all(&info)?;
+        let path = info.join("attributes");
+        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+        for p in patterns {
+            let line = format!("{p} merge={name}");
+            if !text.lines().any(|l| l == line) {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
+        std::fs::write(&path, text)?;
+        Ok(())
+    }
+
     /// A commit whose tree is the clean merge of `a` and `b` (parents a, b),
     /// without touching any worktree. `None` if the merge conflicts.
     pub fn virtual_merge(&self, a: &str, b: &str) -> Result<Option<String>> {
@@ -431,6 +525,88 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    #[test]
+    fn hunk_collisions_follow_git() {
+        // Base "a b c"; theirs inserts after b. Checked against git merge-tree.
+        let (tmp, repo) = init_repo();
+        let d = tmp.path();
+        fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
+        sh(d, &["add", "."]);
+        sh(d, &["commit", "-q", "-m", "f"]);
+        let base = sh(d, &["rev-parse", "HEAD"]).trim().to_owned();
+        let branch = |name: &str, text: &str| {
+            sh(d, &["checkout", "-q", "-B", name, &base]);
+            fs::write(d.join("f.txt"), text).unwrap();
+            sh(d, &["commit", "-q", "-am", name]);
+        };
+        branch("theirs", "a\nb\nT\nc\n");
+        let cases = [
+            ("same_point", "a\nb\nM\nc\n", true),
+            ("superset", "a\nb\nT\nM\nc\n", true),
+            ("modify_next_line", "a\nb\nC\n", true),
+            ("modify_prev_line", "a\nB\nc\n", true),
+            ("one_line_away", "a\nb\nc\nM\n", false),
+            ("elsewhere", "M\na\nb\nc\n", false),
+        ];
+        // Adjacent modifications conflict; one unchanged line between does not.
+        branch("theirs_mod", "A\nb\nc\n");
+        let tm = repo.hunks(&base, "theirs_mod", "f.txt").unwrap();
+        for (name, text, expect) in [
+            ("mod_adjacent", "a\nB\nc\n", true),
+            ("insert_after_modified", "a\nX\nb\nc\n", true),
+            ("mod_one_line_away", "a\nb\nC\n", false),
+        ] {
+            branch(name, text);
+            let o = repo.hunks(&base, name, "f.txt").unwrap();
+            assert_eq!(
+                !repo.merge_tree("theirs_mod", name).unwrap().clean,
+                expect,
+                "git, case {name}"
+            );
+            assert_eq!(
+                o.iter().any(|h| tm.iter().any(|x| x.collides(h))),
+                expect,
+                "prediction, case {name}"
+            );
+        }
+        let t = repo.hunks(&base, "theirs", "f.txt").unwrap();
+        assert_eq!(
+            t,
+            vec![Hunk {
+                old_start: 2,
+                old_count: 0,
+                new_lines: vec!["T".into()]
+            }]
+        );
+        for (name, text, expect) in cases {
+            branch(name, text);
+            let o = repo.hunks(&base, name, "f.txt").unwrap();
+            let predicted = o.iter().any(|h| t.iter().any(|x| x.collides(h)));
+            let actual = !repo.merge_tree("theirs", name).unwrap().clean;
+            assert_eq!(actual, expect, "git, case {name}");
+            assert_eq!(predicted, expect, "prediction, case {name}");
+        }
+    }
+
+    #[test]
+    fn merge_driver_is_used_by_merge_tree() {
+        let (tmp, repo) = init_repo();
+        let d = tmp.path();
+        sh(d, &["checkout", "-q", "-b", "one"]);
+        fs::write(d.join("b.py"), "x = 'one'\n").unwrap();
+        sh(d, &["commit", "-q", "-am", "one"]);
+        sh(d, &["checkout", "-q", "main"]);
+        fs::write(d.join("b.py"), "x = 'two'\n").unwrap();
+        sh(d, &["commit", "-q", "-am", "two"]);
+        assert!(!repo.merge_tree("one", "main").unwrap().clean);
+        // A "driver" that always succeeds by keeping our side.
+        repo.set_merge_driver("keepours", "true", &["*.py"]).unwrap();
+        repo.set_merge_driver("keepours", "true", &["*.py"]).unwrap(); // idempotent
+        assert!(repo.merge_tree("one", "main").unwrap().clean);
+        let attrs = fs::read_to_string(d.join(".git/info/attributes")).unwrap();
+        assert_eq!(attrs.matches("*.py merge=keepours").count(), 1);
     }
 
     #[test]

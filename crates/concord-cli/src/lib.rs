@@ -2,6 +2,7 @@
 
 pub mod live;
 pub mod mcp;
+pub mod regions;
 pub mod report;
 pub mod run;
 

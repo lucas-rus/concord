@@ -20,6 +20,12 @@ pub struct Task {
     pub prompt: String,
 }
 
+/// Files handed to the structured merge driver (languages Mergiraf supports
+/// that occur in the benchmarks).
+const STRUCTURED_MERGE_PATTERNS: &[&str] = &[
+    "*.py", "*.js", "*.ts", "*.tsx", "*.rs", "*.go", "*.java", "*.json", "*.toml", "*.yaml", "*.yml",
+];
+
 #[derive(Clone, Debug)]
 pub struct RunConfig {
     pub repo: PathBuf,
@@ -35,6 +41,10 @@ pub struct RunConfig {
     pub peer_merge: bool,
     /// Contract layer on (default). Off with peer_merge = peer-merge-only ablation.
     pub contracts: bool,
+    /// Region coherence (see `live::State::regions`).
+    pub regions: bool,
+    /// Structured merge driver executable (Mergiraf-compatible CLI).
+    pub merge_driver: Option<String>,
     pub resume_rounds: u32,
     pub claude: String,
     /// Which coding agent runs the tasks.
@@ -584,6 +594,11 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
     }
     state.peer_merge = cfg.peer_merge;
     state.contracts = cfg.contracts;
+    state.regions = cfg.regions;
+    if let Some(cmd) = &cfg.merge_driver {
+        let driver = format!("{cmd} merge --git %O %A %B -s %S -x %X -y %Y -p %P -l %L");
+        repo.set_merge_driver("concord-structured", &driver, STRUCTURED_MERGE_PATTERNS)?;
+    }
     let shared: Shared = Arc::new(Mutex::new(state));
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?.to_string();

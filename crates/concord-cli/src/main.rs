@@ -92,6 +92,17 @@ enum Command {
         /// With --peer-merge this is the peer-merge-only ablation.
         #[arg(long)]
         no_contracts: bool,
+        /// Region coherence (enforce mode): textual overlaps between agents are
+        /// detected after every edit; the higher-ranked agent (later in the task
+        /// list) moves its code or takes over the owner's finished version, and
+        /// cannot finish while its work conflicts with a finished or
+        /// lower-ranked peer. No conflict markers, no peer merge.
+        #[arg(long)]
+        regions: bool,
+        /// Structured merge driver for merges and conflict checks, e.g. the
+        /// path of `mergiraf` (called as `<CMD> merge --git %O %A %B ...`).
+        #[arg(long)]
+        merge_driver: Option<String>,
         /// Rounds of resuming agents that became stale after finishing.
         #[arg(long, default_value_t = 2)]
         resume_rounds: u32,
@@ -203,6 +214,8 @@ fn main() -> Result<()> {
             max_wait_secs,
             peer_merge,
             no_contracts,
+            regions,
+            merge_driver,
             resume_rounds,
             claude,
             agent_cli,
@@ -223,6 +236,8 @@ fn main() -> Result<()> {
                 max_wait: Duration::from_secs(max_wait_secs),
                 peer_merge,
                 contracts: !no_contracts,
+                regions,
+                merge_driver,
                 resume_rounds,
                 claude,
                 agent_cli,
