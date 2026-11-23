@@ -858,8 +858,18 @@ mod tests {
     fn contention_ends_when_the_owner_releases() {
         let (a, b) = (AgentId::new("A"), AgentId::new("B"));
         let mut d = Directory::new();
-        let ca = change(SEND, ChangeKind::ContractChanged, Some("def send_email(to, body)"), Some("def send_email(to, body, ctx)"));
-        let cb = change(SEND, ChangeKind::ContractChanged, Some("def send_email(to, body)"), Some("def send_email(to, body, *, html)"));
+        let ca = change(
+            SEND,
+            ChangeKind::ContractChanged,
+            Some("def send_email(to, body)"),
+            Some("def send_email(to, body, ctx)"),
+        );
+        let cb = change(
+            SEND,
+            ChangeKind::ContractChanged,
+            Some("def send_email(to, body)"),
+            Some("def send_email(to, body, *, html)"),
+        );
         d.observe_footprint(&a, std::slice::from_ref(&ca), BTreeMap::new());
         let n = d.observe_footprint(&b, std::slice::from_ref(&cb), BTreeMap::new());
         assert!(matches!(n[0].kind, NoticeKind::LeaseHeld { .. }));
@@ -867,12 +877,20 @@ mod tests {
         d.publish_all(&a);
         d.release(&a);
         assert!(
-            d.finish_gate(&b).blockers.iter().all(|x| !matches!(x, Blocker::Contended { .. })),
+            d.finish_gate(&b)
+                .blockers
+                .iter()
+                .all(|x| !matches!(x, Blocker::Contended { .. })),
             "release ends contention"
         );
         // B's next observation takes the lease; it is still contended-free.
         d.observe_footprint(&b, &[cb], BTreeMap::new());
-        assert!(d.finish_gate(&b).blockers.iter().all(|x| !matches!(x, Blocker::Contended { .. })));
+        assert!(
+            d.finish_gate(&b)
+                .blockers
+                .iter()
+                .all(|x| !matches!(x, Blocker::Contended { .. }))
+        );
         assert_eq!(d.owner(&SymbolId::new(SEND)), Some(&b));
         // Regression: once B publishes its own version it is not stale on the symbol.
         d.publish_all(&b);

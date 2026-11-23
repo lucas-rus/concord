@@ -479,8 +479,15 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         let mut st = shared.lock().expect("state");
         // Liveness: Concord never holds an agent forever. After MAX_GATE_BLOCKS
         // blocks the agent may finish; the integration check reports the rest.
-        if st.agents.get(agent).is_some_and(|a| a.stats.gate_blocks >= MAX_GATE_BLOCKS) {
-            st.log("stop", json!({ "agent": agent, "decision": "allow", "reason": "block_limit" }));
+        if st
+            .agents
+            .get(agent)
+            .is_some_and(|a| a.stats.gate_blocks >= MAX_GATE_BLOCKS)
+        {
+            st.log(
+                "stop",
+                json!({ "agent": agent, "decision": "allow", "reason": "block_limit" }),
+            );
             finish(&mut st, agent);
             return (String::new(), 0);
         }
@@ -580,7 +587,9 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 // With peer merge on, a conflicting producer merge is handed to the
                 // agent with conflict markers instead of being aborted.
                 let result = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
-                    .and_then(|_| Repo::merge_keep_conflicts(&wt, &p_head, &format!("concord: merge {p} into {agent}")));
+                    .and_then(|_| {
+                        Repo::merge_keep_conflicts(&wt, &p_head, &format!("concord: merge {p} into {agent}"))
+                    });
                 match result {
                     Ok(out) if !out.clean => {
                         if let Some(a) = st.agents.get_mut(agent) {
@@ -605,7 +614,12 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                         return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
                     }
                     Ok(_) => {
-                        let new_base = st.repo.virtual_merge(&base, &p_head).ok().flatten().unwrap_or(p_head.clone());
+                        let new_base = st
+                            .repo
+                            .virtual_merge(&base, &p_head)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(p_head.clone());
                         if let Some(a) = st.agents.get_mut(agent) {
                             a.base = new_base;
                             a.merged_producers.insert(p.clone());
@@ -701,13 +715,14 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     reason.push_str(&format!("  {symbol} (lease held by {who})\n"));
                 }
             }
-            reason.push_str(
-                "Keep its existing signature working (add new parameters as optional), then finish again.",
-            );
+            reason.push_str("Keep its existing signature working (add new parameters as optional), then finish again.");
             if let Some(a) = st.agents.get_mut(agent) {
                 a.stats.gate_blocks += 1;
             }
-            st.log("stop", json!({ "agent": agent, "decision": "block", "reason": "contended" }));
+            st.log(
+                "stop",
+                json!({ "agent": agent, "decision": "block", "reason": "contended" }),
+            );
             return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
         }
         reason.push_str(

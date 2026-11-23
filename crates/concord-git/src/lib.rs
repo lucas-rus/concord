@@ -425,7 +425,12 @@ mod tests {
         // Resolving and committing concludes the merge.
         fs::write(d.join("a.py"), "def f():\n    return 'both'\n").unwrap();
         Repo::commit_all(d, "resolved").unwrap();
-        assert_eq!(sh(d, &["rev-list", "--parents", "-n", "1", "HEAD"]).split_whitespace().count(), 3);
+        assert_eq!(
+            sh(d, &["rev-list", "--parents", "-n", "1", "HEAD"])
+                .split_whitespace()
+                .count(),
+            3
+        );
     }
 
     #[test]
