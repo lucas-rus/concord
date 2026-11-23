@@ -214,6 +214,8 @@ pub enum Gate {
     /// Conflicts with running owners: wait for them (names), or block with the text.
     Wait(Vec<String>, String),
     Block(String),
+    /// Finished owners' work was handed over: progress, not a liveness block.
+    Handoff(String),
 }
 
 /// The region part of the finish gate for `agent` (write-set validation).
@@ -235,6 +237,7 @@ pub fn gate(st: &mut State, agent: &str) -> Gate {
         .filter(|p| p.name != agent && p.status == Status::Finished)
         .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
         .collect();
+    let mut heads = Vec::new();
     for (peer, p_wt, p_branch) in finished {
         let _ = Repo::commit_all(&p_wt, &format!("agent {peer}: work committed by concord"));
         let Ok(head) = st.repo.rev_parse(&p_branch) else {
@@ -249,41 +252,49 @@ pub fn gate(st: &mut State, agent: &str) -> Gate {
             st.region_yields.insert((agent.to_owned(), peer.clone()));
             return Gate::Block(render(&peer, true, &found));
         }
-        // A pending hand-off: this agent yielded lines to `peer`. Now that the
-        // peer has finished and the merge is clean, bring its version in so the
-        // agent can build on it.
+        heads.push((peer, head));
+    }
+    // Pending hand-offs: this agent yielded lines to these finished peers, and
+    // the merges are clean. Bring all their versions in at once so the agent
+    // can build on them.
+    let mut handed = Vec::new();
+    for (peer, head) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
-        if yielded && !st.agents[agent].merged_producers.contains(&peer) {
-            let base = st.agents[agent].base.clone();
-            let merged = Repo::commit_all(
-                &wt,
-                &format!("concord: checkpoint of {agent} before hand-off from {peer}"),
-            )
-            .and_then(|_| Repo::merge_into(&wt, &head, &format!("concord: hand-off of {peer}'s regions to {agent}")));
-            match merged {
-                Ok(m) if m.clean => {
-                    let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head.clone());
-                    if let Some(a) = st.agents.get_mut(agent) {
-                        a.base = new_base;
-                        a.merged_producers.insert(peer.clone());
-                        a.stats.merges.push(peer.clone());
-                    }
-                    let _ = st.refresh(agent);
-                    st.log("region_handoff", json!({ "agent": agent, "owner": peer }));
-                    return Gate::Block(format!(
-                        "[concord] Agent `{peer}` has finished, and Concord merged their finished work into your \
-                         worktree (a clean merge: you had left their lines alone). If your feature needs to change \
-                         the lines they own, do it now, on top of their version; otherwise nothing is left to do. \
-                         Run the tests and finish."
-                    ));
-                }
-                Ok(m) => st.log(
-                    "error",
-                    json!({ "agent": agent, "error": format!("hand-off merge of {peer} conflicted: {:?}", m.conflicted_files) }),
-                ),
-                Err(e) => st.log("error", json!({ "agent": agent, "error": e.to_string() })),
-            }
+        if !yielded || st.agents[agent].merged_producers.contains(&peer) {
+            continue;
         }
+        let base = st.agents[agent].base.clone();
+        let merged = Repo::commit_all(
+            &wt,
+            &format!("concord: checkpoint of {agent} before hand-off from {peer}"),
+        )
+        .and_then(|_| Repo::merge_into(&wt, &head, &format!("concord: hand-off of {peer}'s regions to {agent}")));
+        match merged {
+            Ok(m) if m.clean => {
+                let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head.clone());
+                if let Some(a) = st.agents.get_mut(agent) {
+                    a.base = new_base;
+                    a.merged_producers.insert(peer.clone());
+                    a.stats.merges.push(peer.clone());
+                }
+                st.log("region_handoff", json!({ "agent": agent, "owner": peer }));
+                handed.push(format!("`{peer}`"));
+            }
+            Ok(m) => st.log(
+                "error",
+                json!({ "agent": agent, "error": format!("hand-off merge of {peer} conflicted: {:?}", m.conflicted_files) }),
+            ),
+            Err(e) => st.log("error", json!({ "agent": agent, "error": e.to_string() })),
+        }
+    }
+    if !handed.is_empty() {
+        let _ = st.refresh(agent);
+        return Gate::Handoff(format!(
+            "[concord] {} finished, and Concord merged their finished work into your worktree (clean merges: \
+             you had left their lines alone). If your feature needs to change the lines they own, do it now, on top \
+             of their version; otherwise nothing is left to do. Run the tests and finish.",
+            handed.join(", ")
+        ));
     }
     // Running owners (lower rank): wait for them.
     let running: Vec<(String, String)> = st

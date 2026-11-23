@@ -611,6 +611,15 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                         }
                         return (json!({ "decision": "block", "reason": text }).to_string(), 0);
                     }
+                    // Each finished owner hands over at most once: bounded
+                    // progress, so it does not count toward MAX_GATE_BLOCKS.
+                    crate::regions::Gate::Handoff(text) => {
+                        st.log(
+                            "stop",
+                            json!({ "agent": agent, "decision": "block", "reason": "region_handoff" }),
+                        );
+                        return (json!({ "decision": "block", "reason": text }).to_string(), 0);
+                    }
                 }
             }
             if st.peer_merge
