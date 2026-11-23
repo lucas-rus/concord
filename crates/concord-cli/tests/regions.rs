@@ -138,3 +138,84 @@ fn colliding_appends_are_resolved_without_conflict_markers() {
     git(owner_wt, &["commit", "-q", "-m", "owner", "--allow-empty"]);
     assert!(repo.merge_tree("b/owner", "b/yielder").unwrap().clean);
 }
+
+fn read(shared: &Shared, agent: &str, wt: &Path) {
+    let input = json!({
+        "session_id": format!("s-{agent}"),
+        "tool_name": "Read",
+        "tool_input": { "file_path": wt.join("m.py").to_string_lossy() },
+    });
+    live::handle(shared, agent, "PostToolUse", &input);
+}
+
+/// A contract wait (owner depends on the producer's new signature) and a region
+/// wait (the producer yields a region to the owner) must not form a cycle: the
+/// second wait is not entered, and the agent gets actionable instructions at
+/// once instead of a timeout.
+#[test]
+fn contract_and_region_waits_never_form_a_cycle() {
+    const BASE2: &str = "def g(x):\n    return x\n\n\ndef a():\n    return g(1)\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE2).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let log = tmp.path().join("events.jsonl");
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        Some(&log),
+        Duration::from_secs(4),
+    )
+    .unwrap();
+    st.regions = true;
+    let mut wts = Vec::new();
+    for name in ["owner", "producer"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let (owner_wt, producer_wt) = (wts[0].clone(), wts[1].clone());
+
+    // The producer makes `g` take a required parameter and appends a function;
+    // the owner appends another function at the same place.
+    edit(
+        &shared,
+        "owner",
+        &owner_wt,
+        &format!("{BASE2}\n\ndef c():\n    return 3\n"),
+    );
+    read(&shared, "owner", &owner_wt);
+    edit(
+        &shared,
+        "producer",
+        &producer_wt,
+        &format!(
+            "{}\n\ndef d():\n    return 4\n",
+            BASE2.replace("def g(x):", "def g(x, y):")
+        ),
+    );
+
+    // The producer waits for the owner of the region...
+    let s2 = shared.clone();
+    let waiter = std::thread::spawn(move || stop(&s2, "producer"));
+    std::thread::sleep(Duration::from_millis(600));
+    // ...so the owner must not wait for the producer's contract.
+    let t0 = std::time::Instant::now();
+    let reason = stop(&shared, "owner").unwrap_or_else(|| panic!("{}", fs::read_to_string(&log).unwrap()));
+    assert!(t0.elapsed() < Duration::from_secs(2), "owner waited {:?}", t0.elapsed());
+    assert!(
+        reason.contains("adapt your own call sites"),
+        "{reason}\n{}",
+        fs::read_to_string(&log).unwrap()
+    );
+    assert!(reason.contains("g(x, y)") || reason.contains("g"), "{reason}");
+    let _ = waiter.join().unwrap();
+}

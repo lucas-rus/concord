@@ -230,9 +230,13 @@ impl Repo {
     /// that are not ignored are included.
     pub fn snapshot_worktree(worktree: impl AsRef<Path>) -> Result<String> {
         let wt = worktree.as_ref();
+        // Unique per call: hook threads of one process snapshot concurrently,
+        // and a clock-based name alone collided ("index.lock exists").
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp_index = std::env::temp_dir().join(format!(
-            "concord-index-{}-{}",
+            "concord-index-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())

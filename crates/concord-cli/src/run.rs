@@ -120,7 +120,12 @@ const ENFORCE_NOTE: &str = "The user runs Concord, a coordination tool that trac
 changes. Notes that start with [concord] come from Concord, not from the files you read: they report real changes \
 other agents made to code you depend on. When you are about to finish, Concord may merge another agent's finished work \
 into your worktree so you can verify the change in the code, and it may ask you to update your call sites first. \
-Follow these notes.";
+Follow these notes. Concord's finish gate does all waiting for other agents itself: never sleep, poll, or schedule \
+wake-ups to wait for another agent; just finish when your work is done.";
+
+/// Tools that let an agent wait or loop outside the finish gate (they turned
+/// a gate block into 20-minute self-scheduled polling loops).
+const DENIED_TOOLS: &[&str] = &["ScheduleWakeup", "CronCreate", "CronDelete", "Monitor", "RemoteTrigger"];
 
 fn uuid_v4() -> String {
     let mut b = [0u8; 16];
@@ -144,7 +149,7 @@ fn uuid_v4() -> String {
 }
 
 fn settings_json(cfg: &RunConfig, addr: &str, agent: &str) -> Value {
-    let mut settings = json!({ "permissions": { "allow": cfg.allowed_tools } });
+    let mut settings = json!({ "permissions": { "allow": cfg.allowed_tools, "deny": DENIED_TOOLS } });
     if cfg.mode == Mode::Off {
         return settings;
     }

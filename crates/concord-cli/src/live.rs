@@ -122,6 +122,10 @@ pub struct State {
     /// Pairs (yielder, owner) with a region yielded at some point: the owner's
     /// finished work is handed over to the yielder.
     pub(crate) region_yields: BTreeSet<(String, String)>,
+    /// Waits-for graph of the finish gate, across the contract and region
+    /// layers: agent -> agents it is currently waiting for. A wait that would
+    /// close a cycle is never entered (no cross-layer deadlock).
+    pub(crate) waiting: BTreeMap<String, BTreeSet<String>>,
     revisions: HashMap<String, Arc<Snapshot>>,
     log: Option<std::fs::File>,
     started: Instant,
@@ -153,6 +157,7 @@ impl State {
             regions: false,
             region_alerted: BTreeSet::new(),
             region_yields: BTreeSet::new(),
+            waiting: BTreeMap::new(),
             revisions: HashMap::new(),
             log,
             started: Instant::now(),
@@ -183,6 +188,23 @@ impl State {
                 region_notes: Vec::new(),
             },
         );
+    }
+
+    /// Whether `from` is (transitively) waiting for `to` in the finish gate.
+    pub(crate) fn waits_for(&self, from: &str, to: &str) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![from.to_owned()];
+        while let Some(a) = stack.pop() {
+            if a == to {
+                return true;
+            }
+            if seen.insert(a.clone())
+                && let Some(next) = self.waiting.get(&a)
+            {
+                stack.extend(next.iter().cloned());
+            }
+        }
+        false
     }
 
     pub fn log(&mut self, event: &str, data: Value) {
@@ -516,6 +538,8 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
 
     loop {
         let mut st = shared.lock().expect("state");
+        // Re-established below only if this agent keeps waiting.
+        st.waiting.remove(agent);
         // Liveness: Concord never holds an agent forever. After MAX_GATE_BLOCKS
         // blocks the agent may finish; the integration check reports the rest.
         if st
@@ -552,7 +576,11 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 match crate::regions::gate(&mut st, agent) {
                     crate::regions::Gate::Clear => {}
                     crate::regions::Gate::Wait(owners, text) => {
-                        if Instant::now() < deadline {
+                        // Never wait for an owner that is itself waiting for us.
+                        let waitable: BTreeSet<String> =
+                            owners.iter().filter(|o| !st.waits_for(o, agent)).cloned().collect();
+                        if !waitable.is_empty() && Instant::now() < deadline {
+                            st.waiting.insert(agent.to_owned(), waitable);
                             st.log("wait", json!({ "agent": agent, "for": owners, "reason": "region" }));
                             drop(st);
                             std::thread::sleep(Duration::from_secs(2));
@@ -606,17 +634,33 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             .collect();
 
         if !running.is_empty() {
-            if Instant::now() < deadline {
+            // Never wait for a producer that is itself waiting for us: adapt to
+            // the contract as published instead (below).
+            let waitable: BTreeSet<String> = running.iter().filter(|p| !st.waits_for(p, agent)).cloned().collect();
+            if !waitable.is_empty() && Instant::now() < deadline {
                 st.log("wait", json!({ "agent": agent, "for": running }));
+                st.waiting.insert(agent.to_owned(), waitable);
                 drop(st);
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
-            let reason = format!(
-                "[concord] You depend on contracts that {} is still changing. Wait a moment and finish again; \
-                 Concord will then merge their change into your worktree.",
+            let mut reason = format!(
+                "[concord] {} changed contracts your code depends on and is still working, so Concord cannot merge \
+                 their code yet. Do not wait, poll or schedule anything for them: adapt your own call sites to the \
+                 contracts as published now, run the tests, and finish. Concord merges their code later.\n",
                 running.join(", ")
             );
+            for (s, problems) in &remaining {
+                let now = st
+                    .dir
+                    .published_contract(s)
+                    .map(|c| c.map(|c| c.display.clone()).unwrap_or_else(|| "(removed)".into()))
+                    .unwrap_or_default();
+                reason.push_str(&format!("  {s} is now: {now}\n"));
+                for p in problems {
+                    reason.push_str(&format!("    {p}\n"));
+                }
+            }
             if let Some(a) = st.agents.get_mut(agent) {
                 a.stats.gate_blocks += 1;
             }
