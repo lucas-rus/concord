@@ -16,8 +16,16 @@ use std::time::Duration;
 /// Feed lines kept on screen.
 const FEED: usize = 14;
 
-/// Without events for this long (and without a report), a run looks stopped.
+/// Without events for this long (and without a report or heartbeat), a run
+/// looks stopped.
 const STALE_SECS: u64 = 600;
+
+/// A heartbeat older than this means Concord itself has stopped (it beats
+/// every `run::HEARTBEAT`).
+const HEARTBEAT_STALE: u64 = 15;
+
+/// A working agent without any event for this long is shown as quiet.
+const QUIET_SECS: f64 = 300.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum AgentState {
@@ -29,6 +37,10 @@ pub enum AgentState {
     },
     Blocked(String),
     Finished,
+    /// The agent's process ended with an error (crash, provider or quota).
+    Failed(String),
+    /// The process ended without passing the finish gate.
+    Exited,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -52,6 +64,10 @@ pub struct WatchState {
     pub done: bool,
     /// Seconds since the event log last changed (wall clock), if known.
     pub idle: Option<u64>,
+    /// Seconds since Concord's heartbeat, if the run writes one.
+    pub heartbeat: Option<u64>,
+    /// Problems worth a look: errors, failed agents, block-limit passes.
+    pub warnings: Vec<(f64, String)>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -75,6 +91,11 @@ impl WatchState {
         let a = self.agents.entry(name.to_owned()).or_default();
         a.last = a.last.max(t);
         a
+    }
+
+    fn warn(&mut self, t: f64, text: String) {
+        self.warnings.push((t, text.clone()));
+        self.say(t, text);
     }
 
     fn say(&mut self, t: f64, text: String) {
@@ -139,7 +160,10 @@ impl WatchState {
                         self.say(t, format!("gate      {who} held: {}{detail}", reason.replace('_', " ")));
                     }
                 } else if reason == "block_limit" {
-                    self.say(t, format!("gate      {who} let through at the block limit"));
+                    self.warn(
+                        t,
+                        format!("gate      {who} let through at the block limit (coordination unresolved)"),
+                    );
                 }
             }
             "finished" => {
@@ -189,7 +213,21 @@ impl WatchState {
             "error" => {
                 let who = s(&d, "agent");
                 let msg = s(&d, "error");
-                self.say(t, format!("error     {who}: {}", msg.lines().next().unwrap_or("")));
+                self.warn(t, format!("error     {who}: {}", msg.lines().next().unwrap_or("")));
+            }
+            "agent_exit" => {
+                let who = s(&d, "agent");
+                let error = d.get("error").and_then(Value::as_bool).unwrap_or(false);
+                let result = s(&d, "result");
+                let first = result.lines().next().unwrap_or("").to_owned();
+                let a = self.agent(&who, t);
+                if error {
+                    a.state = AgentState::Failed(first.clone());
+                    self.warn(t, format!("failed    {who}: {first}"));
+                } else if a.state != AgentState::Finished {
+                    a.state = AgentState::Exited;
+                    self.warn(t, format!("exited    {who} ended without passing the finish gate"));
+                }
             }
             _ => {}
         }
@@ -211,14 +249,20 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
         }
     };
     let finished = st.agents.values().filter(|a| a.state == AgentState::Finished).count();
-    let mut out = String::new();
-    let status = match (st.done, st.idle) {
-        (true, _) => "complete".to_owned(),
-        // Agents can think for minutes, but a quarter hour without a single
-        // event and without a report usually means the run has died.
-        (false, Some(idle)) if idle > STALE_SECS => format!("no events for {} min: stopped?", idle / 60),
+    let status = match (st.done, st.heartbeat, st.idle) {
+        (true, _, _) => "complete".to_owned(),
+        // Concord writes a heartbeat every few seconds while it runs.
+        (false, Some(hb), _) if hb > HEARTBEAT_STALE => {
+            format!("Concord is not running (no heartbeat for {hb} s)")
+        }
+        (false, Some(_), _) => "running".to_owned(),
+        // Older runs without a heartbeat: fall back to the event log.
+        (false, None, Some(idle)) if idle > STALE_SECS => format!("no events for {} min: stopped?", idle / 60),
         _ => "running".to_owned(),
     };
+    // The run's clock now, to tell how long each agent has been quiet.
+    let now = st.elapsed + st.idle.unwrap_or(0) as f64;
+    let mut out = String::new();
     let _ = writeln!(
         out,
         "{}  {}  {}/{} finished  {}",
@@ -240,6 +284,14 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             AgentState::Waiting { on, why } => (format!("waiting for {} ({why})", on.join(", ")), "33"),
             AgentState::Blocked(r) => (format!("held: {}", r.replace('_', " ")), "31"),
             AgentState::Finished => ("finished".to_owned(), "32"),
+            AgentState::Failed(m) => (format!("FAILED: {m}"), "31;1"),
+            AgentState::Exited => ("exited without finishing".to_owned(), "31"),
+        };
+        let quiet = now - a.last;
+        let (state, code) = if a.state == AgentState::Working && st.idle.is_some() && quiet > QUIET_SECS {
+            (format!("working, quiet {}", mmss(quiet)), "33")
+        } else {
+            (state, code)
         };
         let mut state = state;
         if state.chars().count() > 34 {
@@ -257,6 +309,16 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             a.combined,
             a.merges
         );
+    }
+    if !st.warnings.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n  {}",
+            paint("31;1", &format!("{} warning(s)", st.warnings.len()))
+        );
+        for (t, line) in st.warnings.iter().rev().take(5).rev() {
+            let _ = writeln!(out, "  {}  {}", paint("2", &mmss(*t)), paint("31", line));
+        }
     }
     if !st.feed.is_empty() {
         let _ = writeln!(out, "\n  {}", paint("1", "coordination"));
@@ -323,6 +385,11 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
             st.apply(line.trim_end());
         }
         st.done = run.join("report.json").exists();
+        st.heartbeat = std::fs::metadata(run.join("heartbeat"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|d| d.as_secs());
         st.idle = std::fs::metadata(run.join("events.jsonl"))
             .and_then(|m| m.modified())
             .ok()
@@ -398,6 +465,43 @@ mod tests {
         assert!(render(&st, "run", false).contains("no events for 20 min: stopped?"));
         st.idle = Some(30);
         assert!(render(&st, "run", false).contains("running"));
+    }
+
+    #[test]
+    fn a_stale_heartbeat_means_concord_stopped() {
+        let mut st = fold(&[r#"{"t":1.0,"event":"footprint","data":{"agent":"a"}}"#]);
+        st.heartbeat = Some(3);
+        assert!(render(&st, "run", false).contains("running"));
+        st.heartbeat = Some(40);
+        assert!(render(&st, "run", false).contains("Concord is not running (no heartbeat for 40 s)"));
+    }
+
+    #[test]
+    fn failures_and_block_limit_passes_are_warnings() {
+        let st = fold(&[
+            r#"{"t":5.0,"event":"agent_exit","data":{"agent":"a","error":true,"result":"Free usage limit reached"}}"#,
+            r#"{"t":6.0,"event":"stop","data":{"agent":"b","decision":"allow","reason":"block_limit"}}"#,
+            r#"{"t":7.0,"event":"agent_exit","data":{"agent":"c","error":false,"result":"done"}}"#,
+        ]);
+        assert_eq!(
+            st.agents["a"].state,
+            AgentState::Failed("Free usage limit reached".into())
+        );
+        assert_eq!(st.agents["c"].state, AgentState::Exited);
+        let screen = render(&st, "run", false);
+        assert!(screen.contains("3 warning(s)"), "{screen}");
+        assert!(screen.contains("FAILED: Free usage limit reached"), "{screen}");
+    }
+
+    #[test]
+    fn quiet_agents_are_flagged() {
+        let mut st = fold(&[
+            r#"{"t":10.0,"event":"footprint","data":{"agent":"a"}}"#,
+            r#"{"t":400.0,"event":"footprint","data":{"agent":"b"}}"#,
+        ]);
+        st.idle = Some(5);
+        let screen = render(&st, "run", false);
+        assert!(screen.contains("working, quiet 06:35"), "{screen}");
     }
 
     #[test]

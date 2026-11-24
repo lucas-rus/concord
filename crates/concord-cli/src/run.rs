@@ -69,6 +69,9 @@ pub enum AgentCli {
 
 const OPENCODE_PLUGIN: &str = include_str!("opencode_plugin.js");
 /// A turn producing no output for this long is considered hung.
+/// Interval of the run's heartbeat file (read by `concord watch`).
+pub const HEARTBEAT: Duration = Duration::from_secs(5);
+
 const OPENCODE_IDLE: Duration = Duration::from_secs(300);
 /// How often a turn is retried when OpenCode's server fails to start.
 const OPENCODE_START_RETRIES: u64 = 4;
@@ -504,7 +507,7 @@ enum SessionArg<'a> {
     Resume(&'a str),
 }
 
-fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>) -> Result<()> {
+fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>, shared: &Shared) -> Result<()> {
     // Poll all agents so each one's time is its own, not the time until the
     // agents before it in the list have finished.
     let mut pending = running;
@@ -514,6 +517,26 @@ fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>) 
         for mut r in pending {
             if r.proc.finished()? {
                 let secs = r.started.elapsed().as_secs_f64();
+                // Report the exit at once, so a crashed or failed agent is
+                // visible while the others are still working.
+                let v: Value = std::fs::read_to_string(&r.out)
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or(Value::Null);
+                let error = v.get("is_error").and_then(Value::as_bool).unwrap_or(v.is_null());
+                let result: String = v
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
+                if let Ok(mut st) = shared.lock() {
+                    st.log(
+                        "agent_exit",
+                        json!({ "agent": r.name, "error": error, "seconds": secs.round(), "result": result }),
+                    );
+                }
                 done.push((r, secs));
             } else {
                 still.push(r);
@@ -612,6 +635,19 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         repo.set_merge_driver("concord-structured", &driver, STRUCTURED_MERGE_PATTERNS)?;
     }
     let shared: Shared = Arc::new(Mutex::new(state));
+    // Heartbeat: `concord watch` tells a live run from a dead one within
+    // seconds, however long the agents think between events.
+    let beating = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let heartbeat = run_dir.join("heartbeat");
+    {
+        let (beating, heartbeat) = (beating.clone(), heartbeat.clone());
+        std::thread::spawn(move || {
+            while beating.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::fs::write(&heartbeat, std::process::id().to_string());
+                std::thread::sleep(HEARTBEAT);
+            }
+        });
+    }
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?.to_string();
     if cfg.mode != Mode::Off {
@@ -647,7 +683,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         eprintln!("  started agent {} (session {sid})", t.name);
     }
     let mut results: BTreeMap<String, AgentResult> = BTreeMap::new();
-    wait_all(running, &mut results)?;
+    wait_all(running, &mut results, &shared)?;
     eprintln!("  all agents finished their first turn");
 
     // Coherence pass: resume agents that became stale after they finished.
@@ -692,7 +728,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
                 )?);
                 results.entry(n.clone()).or_default().resumed += 1;
             }
-            wait_all(running, &mut results)?;
+            wait_all(running, &mut results, &shared)?;
         }
     }
 
@@ -757,6 +793,8 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         wall_seconds: started.elapsed().as_secs_f64(),
         run_dir: run_dir.clone(),
     };
+    beating.store(false, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::fs::remove_file(&heartbeat);
     std::fs::write(run_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
     std::fs::write(run_dir.join("report.md"), render(&report))?;
     Ok(report)
