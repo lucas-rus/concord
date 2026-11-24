@@ -463,8 +463,25 @@ impl State {
         if !self.contracts {
             return None;
         }
-        let remaining = self.auto_ack(agent);
+        let mut remaining = self.auto_ack(agent);
+        // A finished agent whose own call sites already satisfy the published
+        // contract has nothing to do: integration merges both sides. Resuming
+        // it only to "receive" the producer's code lengthened the run's tail
+        // (seen in the Hy4 pilot: two rounds of resumes after all agents had
+        // finished, ending in merge and region conflicts).
+        let id = AgentId::new(agent);
+        let satisfied: Vec<SymbolId> = remaining
+            .iter()
+            .filter(|(_, problems)| problems.is_empty())
+            .map(|(s, _)| s.clone())
+            .collect();
+        for s in satisfied {
+            self.dir.acknowledge(&id, &s);
+            self.log("ack", json!({ "agent": agent, "symbol": s, "finished": true }));
+            remaining.remove(&s);
+        }
         if remaining.is_empty() {
+            let _ = self.take_outbox(agent);
             return None;
         }
         let mut msg = String::from(

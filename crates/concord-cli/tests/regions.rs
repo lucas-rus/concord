@@ -372,3 +372,56 @@ fn hand_offs_are_batched_while_owners_are_running() {
     assert!(merged.contains("return 10") && merged.contains("return 20"), "{merged}");
     assert_eq!(stop(&shared, "y"), None);
 }
+
+/// After a consumer has finished, a contract change resumes it only if its
+/// own call sites violate the new contract; a conforming consumer is left
+/// alone (integration merges both sides).
+#[test]
+fn finished_consumers_are_resumed_only_for_real_violations() {
+    for (call, expect_resume) in [("g(3)", true), ("g(3, 0)", false)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        fs::write(root.join("m.py"), "def g(x, y=0):\n    return x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        let repo = Repo::open(&root).unwrap();
+        let base = repo.rev_parse("HEAD").unwrap();
+        let st = State::new(
+            repo.clone(),
+            base.clone(),
+            Mode::Enforce,
+            None,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let shared: Shared = Arc::new(Mutex::new(st));
+        let mut wts = Vec::new();
+        for name in ["producer", "consumer"] {
+            let wt = tmp.path().join("wt").join(name);
+            repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+            shared
+                .lock()
+                .unwrap()
+                .add_agent(name, wt.clone(), format!("b/{name}"), "task");
+            wts.push(wt);
+        }
+        // The consumer adds a caller in its own module and finishes.
+        let user = wts[1].join("u.py");
+        fs::write(&user, format!("from m import g\n\n\ndef c():\n    return {call}\n")).unwrap();
+        live::handle(
+            &shared,
+            "consumer",
+            "PostToolUse",
+            &json!({ "session_id": "s-c", "tool_name": "Write", "tool_input": { "file_path": user.to_string_lossy() } }),
+        );
+        read(&shared, "consumer", &wts[1]);
+        assert_eq!(stop(&shared, "consumer"), None);
+        // The producer makes `y` required.
+        edit(&shared, "producer", &wts[0], "def g(x, y):\n    return x\n");
+        assert_eq!(stop(&shared, "producer"), None);
+        let resume = shared.lock().unwrap().needs_resume("consumer");
+        assert_eq!(resume.is_some(), expect_resume, "call {call}: {resume:?}");
+    }
+}
