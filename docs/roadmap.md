@@ -50,7 +50,8 @@ Aligned with the thesis work plan (defence: summer 2027).
 
 ## M5: Stretch (May 2027)
 
-- [ ] TypeScript front-end (tree-sitter-typescript; `tsc` for type-checking)
+- [x] TypeScript/JavaScript front-end (tree-sitter-typescript): symbols, contracts, imports/re-exports, reference resolution
+- [ ] `tsc`-based type information for TypeScript (resolver precision, inferred types)
 - [ ] Pseudo-symbols: config keys, routes, DB schemas
 - [ ] Conflict-aware dispatch (predicted footprints)
 - [ ] TLA+ model of the protocol; `ratatui` dashboard

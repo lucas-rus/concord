@@ -159,13 +159,19 @@ enum Command {
     },
 }
 
+/// Index a file with the front-end for its extension; other files are read
+/// as Python (the behaviour before language dispatch).
+fn index_any(path: &str, src: &str) -> Result<concord_lang::FileIndex, concord_lang::LangError> {
+    concord_lang::index_file(path, src).unwrap_or_else(|| python::index_file(path, src))
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Symbols { files, json } => {
             let mut all = Vec::new();
             for f in &files {
                 let src = std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
-                let idx = python::index_file(&f.to_string_lossy(), &src)?;
+                let idx = index_any(&f.to_string_lossy(), &src)?;
                 if json {
                     all.push(idx);
                 } else {
@@ -178,8 +184,8 @@ fn main() -> Result<()> {
         }
         Command::Diff { before, after, json } => {
             let path = after.to_string_lossy().into_owned();
-            let b = python::index_file(&path, &std::fs::read_to_string(&before)?)?;
-            let a = python::index_file(&path, &std::fs::read_to_string(&after)?)?;
+            let b = index_any(&path, &std::fs::read_to_string(&before)?)?;
+            let a = index_any(&path, &std::fs::read_to_string(&after)?)?;
             let changes = diff_symbols(&b.symbols, &a.symbols);
             if json {
                 println!("{}", serde_json::to_string_pretty(&changes)?);

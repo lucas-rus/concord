@@ -73,6 +73,7 @@ pub fn index_file(path: &str, source: &str) -> Result<FileIndex, LangError> {
         module,
         symbols,
         imports: x.imports,
+        exports: Vec::new(),
         refs: x.refs,
         has_errors: tree.root_node().has_error(),
     })
@@ -856,7 +857,7 @@ impl<'a> Extractor<'a> {
     }
 }
 
-fn span_of(n: Node) -> Span {
+pub(crate) fn span_of(n: Node) -> Span {
     Span {
         start_line: n.start_position().row as u32 + 1,
         end_line: n.end_position().row as u32 + 1,
@@ -875,14 +876,14 @@ pub(crate) fn collapse_ws(s: &str) -> String {
 }
 
 /// `( a, b, )` -> `(a, b)` for display purposes.
-fn tidy_params(s: &str) -> String {
+pub(crate) fn tidy_params(s: &str) -> String {
     s.replace("( ", "(")
         .replace(" )", ")")
         .replace(", )", ")")
         .replace(",)", ")")
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_owned()
     } else {

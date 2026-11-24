@@ -2,9 +2,11 @@
 //!
 //! Language front-ends that turn source files into Concord symbols (with
 //! contract and body digests), import bindings and resolved references.
-//! Python is supported first; TypeScript is planned.
+//! Supported: Python ([`python`]) and TypeScript/JavaScript ([`typescript`]);
+//! [`index_file`] picks the front-end by file extension.
 
 pub mod python;
+pub mod typescript;
 
 use concord_core::{CallArgs, Symbol, SymbolId, SymbolKind, UseSite};
 use serde::{Deserialize, Serialize};
@@ -46,15 +48,26 @@ pub struct FileIndex {
     pub module: String,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<ImportBinding>,
+    /// Names this module re-exports (`local` = exported name, `*` for
+    /// `export * from`; `target` = dotted symbol or module). TypeScript only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports: Vec<ImportBinding>,
     pub refs: Vec<RawRef>,
     /// The parser recovered from syntax errors (results may be partial).
     pub has_errors: bool,
+}
+
+/// True if some front-end handles this path (by extension).
+pub fn is_supported_path(path: &str) -> bool {
+    python::is_python_path(path) || typescript::is_typescript_path(path)
 }
 
 /// Index a file if its language is supported.
 pub fn index_file(path: &str, source: &str) -> Option<Result<FileIndex, LangError>> {
     if python::is_python_path(path) {
         Some(python::index_file(path, source))
+    } else if typescript::is_typescript_path(path) {
+        Some(typescript::index_file(path, source))
     } else {
         None
     }
@@ -66,6 +79,8 @@ pub struct RepoIndex {
     files: BTreeMap<String, FileIndex>,
     by_id: HashMap<SymbolId, (String, usize)>,
     callables_by_name: HashMap<String, Vec<SymbolId>>,
+    /// Module name -> its re-exports (exported name or `*`, target).
+    reexports: HashMap<String, Vec<(String, String)>>,
 }
 
 impl RepoIndex {
@@ -92,7 +107,14 @@ impl RepoIndex {
     fn rebuild(&mut self) {
         self.by_id.clear();
         self.callables_by_name.clear();
+        self.reexports.clear();
         for (path, f) in &self.files {
+            for e in &f.exports {
+                self.reexports
+                    .entry(f.module.clone())
+                    .or_default()
+                    .push((e.local.clone(), e.target.clone()));
+            }
             for (i, s) in f.symbols.iter().enumerate() {
                 self.by_id.insert(s.id.clone(), (path.clone(), i));
                 if matches!(s.kind, SymbolKind::Method | SymbolKind::Function) {
@@ -139,16 +161,26 @@ impl RepoIndex {
     /// Resolve a raw reference made in `file` to a known symbol.
     ///
     /// Strategy (sound-ish over-approximation, see docs/design.md):
-    /// 1. `self.x` / `cls.x` inside a method -> member of the enclosing class;
+    /// 1. `self.x` / `cls.x` (`this.x` in TypeScript) inside a method -> member
+    ///    of the enclosing class;
     /// 2. names bound by imports (incl. `import a.b` chains and `*` imports);
     /// 3. module-level names of the same module;
     /// 4. for attribute *calls* on unknown receivers, a method/function with
-    ///    that name if it is unique in the repository.
+    ///    that name if it is unique in the repository (in TypeScript, not for
+    ///    names of built-in methods such as `map` or `get`).
+    ///
+    /// Lookups follow TypeScript re-exports (`export ... from`, barrels).
     pub fn resolve(&self, file: &FileIndex, r: &RawRef) -> Option<SymbolId> {
         let head = r.chain.first()?;
         let rest = &r.chain[1..];
 
-        if (head == "self" || head == "cls")
+        let is_ts = typescript::is_typescript_path(&file.path);
+        let is_receiver = if is_ts {
+            head == "this"
+        } else {
+            head == "self" || head == "cls"
+        };
+        if is_receiver
             && !rest.is_empty()
             && let Some(class) = self.enclosing_class(&r.from)
         {
@@ -189,6 +221,9 @@ impl RepoIndex {
         }
         if r.is_call && !rest.is_empty() {
             let name = r.chain.last()?;
+            if is_ts && typescript::is_builtin_method(name) {
+                return None;
+            }
             if let Some(c) = self.callables_by_name.get(name)
                 && c.len() == 1
             {
@@ -256,11 +291,66 @@ impl RepoIndex {
             cur.push_str(part);
             candidates.push(cur.clone());
         }
-        candidates
+        let direct = candidates
             .into_iter()
             .rev()
             .map(SymbolId::new)
-            .find(|c| self.by_id.contains_key(c))
+            .find(|c| self.by_id.contains_key(c));
+        if direct.is_some() || self.reexports.is_empty() {
+            return direct;
+        }
+        self.via_reexports(base, rest, 0)
+    }
+
+    /// Follow re-exports: `m.x.rest` where module `m` re-exports `x` (or `*`)
+    /// from a target. Bounded depth guards against export cycles.
+    fn via_reexports(&self, base: &str, rest: &[String], depth: usize) -> Option<SymbolId> {
+        if depth > 8 {
+            return None;
+        }
+        let mut segs: Vec<String> = base.split('.').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+        segs.extend(rest.iter().cloned());
+        for i in (0..segs.len()).rev() {
+            let Some(exports) = self.reexports.get(&segs[..i].join(".")) else {
+                continue;
+            };
+            let name = &segs[i];
+            let tail = &segs[i + 1..];
+            for (exported, target) in exports {
+                let base = if exported == name {
+                    target.clone()
+                } else if exported == "*" {
+                    format!("{target}.{name}")
+                } else {
+                    continue;
+                };
+                let found = self
+                    .lookup(&base, tail)
+                    .or_else(|| self.via_reexports(&base, tail, depth + 1));
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        None
+    }
+
+    /// Longest known symbol among `base`, `base.rest[0]`, ... (no re-exports).
+    fn lookup(&self, base: &str, rest: &[String]) -> Option<SymbolId> {
+        let mut cur = base.to_owned();
+        let mut best = self
+            .by_id
+            .contains_key(&SymbolId::new(cur.clone()))
+            .then(|| SymbolId::new(cur.clone()));
+        for part in rest {
+            cur.push('.');
+            cur.push_str(part);
+            let id = SymbolId::new(cur.clone());
+            if self.by_id.contains_key(&id) {
+                best = Some(id);
+            }
+        }
+        best
     }
 }
 
