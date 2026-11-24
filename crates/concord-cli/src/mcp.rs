@@ -55,7 +55,8 @@ fn tools() -> Value {
                     "test_cmd": { "type": "string", "description": "Shell command that tests the integrated result (run in the repository root), e.g. 'python -m pytest -q'." },
                     "base": { "type": "string", "description": "Revision the agents start from (default HEAD)." },
                     "model": { "type": "string", "description": "Model for the agents (default from the server configuration)." },
-                    "coordination": { "type": "string", "enum": ["full", "regions", "contracts", "peer-merge", "off"], "description": "full (default): contract notices + finish gate + peer merge; regions: contract notices + region coherence (agents never receive each other's conflicts; overlapping edits are moved or handed off); off: plain parallel agents (baseline)." }
+                    "coordination": { "type": "string", "enum": ["full", "regions", "contracts", "peer-merge", "off"], "description": "full (default): contract notices + finish gate + peer merge; regions: contract notices + region coherence (agents never receive each other's conflicts; overlapping edits are moved or handed off, insertions at the same place are combined); off: plain parallel agents (baseline)." },
+                    "fails_together": { "type": "boolean", "description": "Before an agent may finish, run test_cmd on its work merged with the finished agents' work, and block on tests that pass alone but fail together (needs test_cmd)." }
                 },
                 "required": ["tasks"]
             }
@@ -274,6 +275,11 @@ fn start_run(cfg: &McpConfig, repo: &Repo, root: &Path, args: &Value) -> Result<
     }
     if let Some(t) = args.get("test_cmd").and_then(Value::as_str) {
         cmd_args.extend(["--test-cmd".into(), t.to_owned()]);
+        if args.get("fails_together").and_then(Value::as_bool).unwrap_or(false) {
+            cmd_args.push("--fails-together".into());
+        }
+    } else if args.get("fails_together").and_then(Value::as_bool).unwrap_or(false) {
+        bail!("fails_together needs test_cmd");
     }
     let log = std::fs::File::create(dir.join("concord.log"))?;
     let mut cmd = Command::new(&cfg.concord_exe);
