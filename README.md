@@ -202,11 +202,13 @@ flowchart LR
 | Crate | Role | Status |
 |---|---|---|
 | [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, the coherence protocol (pure state machine), pairwise conflict analysis | ✅ M0 |
-| [`concord-lang`](crates/concord-lang) | tree-sitter front-end: Python symbols, normalised contracts, body digests, imports, reference resolution | ✅ M0 (Python) |
+| [`concord-lang`](crates/concord-lang) | tree-sitter front-ends: symbols, normalised contracts, body digests, imports, reference resolution | ✅ Python, TypeScript/JavaScript |
 | [`concord-git`](crates/concord-git) | git plumbing: tree reading, in-memory `merge-tree`, dirty-worktree snapshots | ✅ M0 |
 | [`concord-cli`](crates/concord-cli) | `concord` binary: `symbols`, `diff`, `analyze --notices` | ✅ M0 |
 | `concord-daemon` | Host daemon: hook ingestion (HTTP), live directory, notices, finish gate, event log | ⏳ M1 |
 | `concord-mcp` | MCP server for agents (`concord_status`, `concord_negotiate`, ...) | ⏳ M2 |
+
+**Languages.** Concord's symbol analysis covers **Python** (`.py`, `.pyi`) and **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`; declaration files, `*.min.js` and `node_modules` are skipped). The front-end is picked by file extension; files in other languages still take part in textual merge checks, but get no symbol-level notices. The TypeScript front-end is syntactic (tree-sitter, no `tsc`): relative imports and re-exports (`export ... from`) are resolved inside the repository, package imports are treated as external, interfaces and enums are classes and type aliases are variables, and type annotations are part of a contract.
 
 Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech-stack.md](docs/tech-stack.md) · Related work: [docs/research/related-work.md](docs/research/related-work.md) · Evaluation plan: [eval/README.md](eval/README.md)
 

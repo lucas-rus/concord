@@ -13,7 +13,7 @@ use concord_core::{
     summarize,
 };
 use concord_git::{FileStatus, Repo};
-use concord_lang::{FileIndex, RepoIndex, python};
+use concord_lang::{FileIndex, LangError, RepoIndex};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,17 +36,25 @@ pub struct Analysis {
     pub parse_warnings: Vec<String>,
 }
 
-/// Index every Python file of `rev`.
+/// Index one source file with the front-end for its extension. Callers
+/// filter with [`concord_lang::is_supported_path`] first.
+fn index_source(path: &str, src: &str) -> Result<FileIndex, LangError> {
+    concord_lang::index_file(path, src)
+        .unwrap_or_else(|| Err(LangError::Parse(format!("{path}: unsupported language"))))
+}
+
+/// Index every source file of `rev` in a supported language (Python,
+/// TypeScript/JavaScript).
 pub fn index_revision(repo: &Repo, rev: &str, warnings: &mut Vec<String>) -> Result<BTreeMap<String, FileIndex>> {
     let paths: Vec<String> = repo
         .list_files(rev)?
         .into_iter()
-        .filter(|p| python::is_python_path(p))
+        .filter(|p| concord_lang::is_supported_path(p))
         .collect();
     let contents = repo.read_files(rev, &paths)?;
     let mut out = BTreeMap::new();
     for (path, src) in contents {
-        match python::index_file(&path, &src) {
+        match index_source(&path, &src) {
             Ok(f) => {
                 if f.has_errors {
                     warnings.push(format!("{rev}:{path}: syntax errors (partial index)"));
@@ -82,7 +90,10 @@ pub fn footprint_and_index(
 ) -> Result<(BranchFootprint, RepoIndex)> {
     let changed = repo.changed_files(base, branch)?;
     let changed_files: BTreeSet<String> = changed.iter().map(|c| c.path.clone()).collect();
-    let py: Vec<&concord_git::ChangedFile> = changed.iter().filter(|c| python::is_python_path(&c.path)).collect();
+    let py: Vec<&concord_git::ChangedFile> = changed
+        .iter()
+        .filter(|c| concord_lang::is_supported_path(&c.path))
+        .collect();
     let to_read: Vec<String> = py
         .iter()
         .filter(|c| c.status != FileStatus::Deleted)
@@ -98,7 +109,7 @@ pub fn footprint_and_index(
             continue;
         }
         let Some(src) = contents.get(&c.path) else { continue };
-        match python::index_file(&c.path, src) {
+        match index_source(&c.path, src) {
             Ok(f) => {
                 if f.has_errors {
                     warnings.push(format!("{branch}:{}: syntax errors (partial index)", c.path));
