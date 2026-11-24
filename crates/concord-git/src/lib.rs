@@ -321,6 +321,87 @@ impl Repo {
 
     /// Merge `rev` into the worktree, leaving conflict markers in place for the
     /// agent to resolve (no abort). Returns the conflicted files.
+    /// Merge `rev` into the worktree's branch like `merge_into`, but resolve the
+    /// conflicts in `union_files` by keeping both sides' lines, `rev`'s first
+    /// (git's union merge, restricted to files the caller classified as
+    /// insert/insert collisions). Any other conflict aborts the merge.
+    pub fn merge_into_union(
+        worktree: &Path,
+        rev: &str,
+        message: &str,
+        union_files: &[String],
+    ) -> Result<MergeIntoOutcome> {
+        let mut args: Vec<&str> = IDENTITY.to_vec();
+        args.extend(["merge", "--no-ff", "--no-commit", rev]);
+        let merged = run(worktree, &args, None);
+        if let Err(e) = &merged
+            && !matches!(e, GitError::Command { .. })
+        {
+            return Err(merged.unwrap_err());
+        }
+        let abort = |files: Vec<String>| {
+            let _ = run(worktree, &["merge", "--abort"], None);
+            Ok(MergeIntoOutcome {
+                clean: false,
+                conflicted_files: files,
+            })
+        };
+        let files: Vec<String> = run(worktree, &["diff", "--name-only", "--diff-filter=U"], None)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        if merged.is_err() && files.is_empty() {
+            return abort(files);
+        }
+        if files.iter().any(|f| !union_files.contains(f)) {
+            return abort(files);
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "concord-union-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let result = (|| -> Result<()> {
+            for f in &files {
+                let stage = |n: u8| run(worktree, &["show", &format!(":{n}:{f}")], None).unwrap_or_default();
+                let (base, ours, theirs) = (dir.join("base"), dir.join("ours"), dir.join("theirs"));
+                std::fs::write(&base, stage(1))?;
+                std::fs::write(&ours, stage(2))?;
+                std::fs::write(&theirs, stage(3))?;
+                let out = Command::new("git")
+                    .current_dir(worktree)
+                    .args(["merge-file", "--union", "-p"])
+                    .arg(&theirs)
+                    .arg(&base)
+                    .arg(&ours)
+                    .output()?;
+                if !out.status.success() {
+                    return Err(GitError::Command {
+                        args: "merge-file --union".into(),
+                        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                    });
+                }
+                std::fs::write(worktree.join(f), &out.stdout)?;
+                run(worktree, &["add", "--", f], None)?;
+            }
+            let mut args: Vec<&str> = IDENTITY.to_vec();
+            args.extend(["commit", "--no-edit", "-m", message]);
+            run(worktree, &args, None)?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        match result {
+            Ok(()) => Ok(MergeIntoOutcome {
+                clean: true,
+                conflicted_files: vec![],
+            }),
+            Err(_) => abort(files),
+        }
+    }
+
     pub fn merge_keep_conflicts(worktree: &Path, rev: &str, message: &str) -> Result<MergeIntoOutcome> {
         let mut args: Vec<&str> = IDENTITY.to_vec();
         args.extend(["merge", "--no-ff", "--no-edit", "-m", message, rev]);

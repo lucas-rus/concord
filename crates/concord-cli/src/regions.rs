@@ -72,6 +72,23 @@ pub fn conflicts(repo: &Repo, mine: &str, theirs: &str) -> Vec<FileConflict> {
         .collect()
 }
 
+/// Whether the collision in this file is only two insertions at the same
+/// point. Additions of members commute (Apel's semistructured merge), so
+/// Concord resolves these by keeping both, the owner's first, instead of
+/// asking anybody to move code: with many agents adding methods to one
+/// class, free insertion points run out.
+pub fn insert_only(f: &FileConflict) -> bool {
+    !f.mine.is_empty()
+        && !f.theirs.is_empty()
+        && f.mine.iter().chain(&f.theirs).all(|h| h.old_count == 0)
+        && f.mine
+            .iter()
+            .all(|m| f.theirs.iter().any(|t| t.old_start == m.old_start))
+        && f.theirs
+            .iter()
+            .all(|t| f.mine.iter().any(|m| m.old_start == t.old_start))
+}
+
 fn span(h: &Hunk) -> String {
     if h.old_count == 0 {
         format!("inserted after line {}", h.old_start)
@@ -177,6 +194,23 @@ pub fn after_edit(st: &mut State, agent: &str) {
         if new.is_empty() {
             continue;
         }
+        // Insert/insert collisions need no action: the yielder receives the
+        // owner's version with both insertions kept (union hand-off).
+        let (union, new): (Vec<FileConflict>, Vec<FileConflict>) = new.into_iter().partition(insert_only);
+        if !union.is_empty() {
+            for f in &union {
+                st.region_alerted
+                    .insert((yielder.clone(), owner.clone(), f.file.clone()));
+            }
+            st.region_yields.insert((yielder.clone(), owner.clone()));
+            st.log(
+                "region_union",
+                json!({ "yielder": yielder, "owner": owner, "files": union.iter().map(|f| &f.file).collect::<Vec<_>>() }),
+            );
+        }
+        if new.is_empty() {
+            continue;
+        }
         // Hunks are oriented from `agent`'s side; flip them for the notice if
         // the peer is the one who yields.
         let new: Vec<FileConflict> = if yielder == agent {
@@ -249,15 +283,17 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
             continue;
         };
         let found = conflicts(&st.repo, &me, &head);
-        if !found.is_empty() {
+        if !found.is_empty() && !found.iter().all(insert_only) {
             st.log(
                 "stop",
                 json!({ "agent": agent, "decision": "block", "reason": "region_conflict", "owner": peer, "files": found.iter().map(|f| &f.file).collect::<Vec<_>>() }),
             );
             st.region_yields.insert((agent.to_owned(), peer.clone()));
-            return Gate::Block(render(&peer, true, &found));
+            let real: Vec<FileConflict> = found.into_iter().filter(|f| !insert_only(f)).collect();
+            return Gate::Block(render(&peer, true, &real));
         }
-        heads.push((peer, head));
+        let union: Vec<String> = found.into_iter().map(|f| f.file).collect();
+        heads.push((peer, head, union));
     }
     // Running owners (lower rank): wait for them.
     let running: Vec<(String, String)> = st
@@ -270,7 +306,18 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let mut text = String::new();
     for (peer, snap) in running {
         let found = conflicts(&st.repo, &me, &snap);
-        if !found.is_empty() {
+        if !found.is_empty() && found.iter().all(insert_only) {
+            st.region_yields.insert((agent.to_owned(), peer.clone()));
+            let files: Vec<&str> = found.iter().map(|f| f.file.as_str()).collect();
+            let _ = writeln!(
+                text,
+                "[concord] You and agent `{peer}` (still working) both added code at the same place in {}. \
+                 Nothing to do: when `{peer}` finishes, Concord merges their version into your worktree and keeps \
+                 both additions. Do not wait or poll; finish your work and try to finish again.",
+                files.join(", ")
+            );
+            owners.push(peer);
+        } else if !found.is_empty() {
             for f in &found {
                 st.region_alerted
                     .insert((agent.to_owned(), peer.clone(), f.file.clone()));
@@ -301,9 +348,9 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     // the merges are clean. Bring all their versions in at once so the agent
     // can build on them.
     let mut handed = Vec::new();
-    for (peer, head) in heads {
+    for (peer, head, union) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
-        if !yielded || st.agents[agent].merged_producers.contains(&peer) {
+        if (!yielded && union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
             continue;
         }
         let base = st.agents[agent].base.clone();
@@ -311,7 +358,14 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
             &wt,
             &format!("concord: checkpoint of {agent} before hand-off from {peer}"),
         )
-        .and_then(|_| Repo::merge_into(&wt, &head, &format!("concord: hand-off of {peer}'s regions to {agent}")));
+        .and_then(|_| {
+            let msg = format!("concord: hand-off of {peer}'s regions to {agent}");
+            if union.is_empty() {
+                Repo::merge_into(&wt, &head, &msg)
+            } else {
+                Repo::merge_into_union(&wt, &head, &msg, &union)
+            }
+        });
         match merged {
             Ok(m) if m.clean => {
                 let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head.clone());

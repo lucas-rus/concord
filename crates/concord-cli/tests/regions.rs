@@ -1,7 +1,6 @@
-//! Region coherence end to end, through the hook protocol: two agents append a
-//! function at the same place; the higher-ranked one is told, waits for the
-//! owner, moves its code, and receives the owner's finished work by a clean
-//! hand-off. The final branches merge without conflict.
+//! Region coherence end to end, through the hook protocol: overlapping edits,
+//! hand-offs, union hand-offs of insert/insert collisions, and the interaction
+//! with the contract layer's waits.
 
 use concord_cli::live::{self, Mode, Shared, State};
 use concord_git::Repo;
@@ -51,7 +50,7 @@ fn stop(shared: &Shared, agent: &str) -> Option<String> {
 }
 
 #[test]
-fn colliding_appends_are_resolved_without_conflict_markers() {
+fn colliding_appends_are_combined_by_a_union_hand_off() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -82,7 +81,8 @@ fn colliding_appends_are_resolved_without_conflict_markers() {
     let shared: Shared = Arc::new(Mutex::new(st));
     let (owner_wt, yielder_wt) = (&wts[0], &wts[1]);
 
-    // Both append a function at the end of the module: a collision.
+    // Both append a function at the end of the module: an insert/insert
+    // collision. Nobody is asked to move code.
     let owner_text = format!("{BASE}\n\ndef c():\n    return 3\n");
     assert!(edit(&shared, "owner", owner_wt, &owner_text).is_empty());
     let out = edit(
@@ -91,42 +91,24 @@ fn colliding_appends_are_resolved_without_conflict_markers() {
         yielder_wt,
         &format!("{BASE}\n\ndef d():\n    return 4\n"),
     );
-    assert!(out.contains("region conflict"), "{out}");
-    assert!(out.contains("`owner`") && out.contains("def c():"), "{out}");
-    // The same collision is not reported twice.
-    assert!(
-        !edit(
-            &shared,
-            "yielder",
-            yielder_wt,
-            &format!("{BASE}\n\ndef d():\n    return 44\n")
-        )
-        .contains("region")
-    );
+    assert!(!out.contains("region conflict"), "{out}");
 
-    // The yielder may not finish while the running owner holds the region.
+    // The yielder may not finish before the owner: it must receive its version.
     let reason = stop(&shared, "yielder").expect("blocked");
-    assert!(reason.contains("region conflict"), "{reason}");
+    assert!(reason.contains("both added code at the same place"), "{reason}");
 
     // The owner (lower rank) is never held back by the yielder.
     assert_eq!(stop(&shared, "owner"), None);
 
-    // Still conflicting with the now finished owner: blocked again.
-    let reason = stop(&shared, "yielder").expect("blocked");
-    assert!(reason.contains("bring their finished version"), "{reason}");
-
-    // The yielder restores the end of the file and puts its code elsewhere.
-    edit(
-        &shared,
-        "yielder",
-        yielder_wt,
-        &format!("def d():\n    return 4\n\n\n{BASE}"),
-    );
-    // Clean now: Concord hands the owner's finished work over...
+    // Concord hands the owner's work over and keeps both additions...
     let reason = stop(&shared, "yielder").expect("hand-off");
     assert!(reason.contains("merged their finished work"), "{reason}");
     let merged = fs::read_to_string(yielder_wt.join("m.py")).unwrap();
     assert!(merged.contains("def c():") && merged.contains("def d():"), "{merged}");
+    assert!(
+        merged.find("def c():") < merged.find("def d():"),
+        "owner first: {merged}"
+    );
     assert!(!merged.contains("<<<<<<<"));
     // ...and the yielder may finish.
     assert_eq!(stop(&shared, "yielder"), None);
