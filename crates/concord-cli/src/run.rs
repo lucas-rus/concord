@@ -87,6 +87,38 @@ const OPENCODE_START_FAILURE: &str = "exited before reporting readiness";
 /// Upper bound on turns (first prompt plus gate continuations) per agent.
 const OPENCODE_MAX_TURNS: u32 = 10;
 
+/// Resumes of a session after its turn ended on a network error.
+const OPENCODE_TRANSPORT_RETRIES: u32 = 5;
+
+const TRANSPORT_CONTINUE: &str = "The connection to the model provider was lost in the middle of your last step. \
+Nothing you did was lost. Continue the task exactly where you left off.";
+
+/// Markers of transport failures in an OpenCode error event.
+const TRANSPORT_MARKERS: &[&str] = &[
+    "provider.transport",
+    "enotfound",
+    "econnreset",
+    "etimedout",
+    "econnrefused",
+    "socket",
+    "fetch failed",
+    "network",
+];
+
+/// Whether a turn's event stream ended on a transport error.
+fn ended_on_transport_error(log: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(log) else {
+        return false;
+    };
+    let Some(last) = text.lines().rev().find_map(|l| serde_json::from_str::<Value>(l).ok()) else {
+        return false;
+    };
+    last.get("type").and_then(Value::as_str) == Some("error")
+        && TRANSPORT_MARKERS
+            .iter()
+            .any(|m| last.to_string().to_lowercase().contains(m))
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AgentResult {
     pub name: String,
@@ -386,7 +418,8 @@ impl OpencodeJob {
         let mut cost = 0.0f64;
         let mut last_text = String::new();
         let mut error = false;
-        while turns < OPENCODE_MAX_TURNS {
+        let mut transport_retries = 0u32;
+        while turns < OPENCODE_MAX_TURNS + transport_retries {
             turns += 1;
             let (sid, text, c, ok) = self.turn(turns, &message, session.as_deref());
             cost += c;
@@ -395,6 +428,28 @@ impl OpencodeJob {
             }
             if !text.is_empty() {
                 last_text = text;
+            }
+            // A dropped connection to the model provider (DNS, reset,
+            // timeout) is not the agent's doing: wait and resume the same
+            // session instead of ending the agent.
+            if !ok
+                && session.is_some()
+                && transport_retries < OPENCODE_TRANSPORT_RETRIES
+                && ended_on_transport_error(&PathBuf::from(format!(
+                    "{}.turn{turns}.jsonl",
+                    self.log_prefix.display()
+                )))
+            {
+                transport_retries += 1;
+                if let Ok(mut st) = self.shared.lock() {
+                    st.log(
+                        "transport_retry",
+                        json!({ "agent": self.name, "attempt": transport_retries }),
+                    );
+                }
+                std::thread::sleep(Duration::from_secs(20 * u64::from(transport_retries)));
+                message = TRANSPORT_CONTINUE.to_owned();
+                continue;
             }
             if !ok {
                 error = true;
@@ -898,5 +953,36 @@ mod tests {
             parse_opencode_events(ok),
             (Some("ses_1".to_owned()), "done".to_owned(), 0.25)
         );
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn detects_a_turn_that_ended_on_a_network_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        std::fs::write(
+            &p,
+            "{\"type\":\"step_finish\"}\n{\"type\":\"error\",\"error\":{\"type\":\"provider.transport\",\"message\":\"getaddrinfo ENOTFOUND opencode.ai\"}}\n",
+        )
+        .unwrap();
+        assert!(ended_on_transport_error(&p));
+        // Recovered: progress after the error.
+        std::fs::write(
+            &p,
+            "{\"type\":\"error\",\"error\":{\"message\":\"ECONNRESET\"}}\n{\"type\":\"step_finish\"}\n",
+        )
+        .unwrap();
+        assert!(!ended_on_transport_error(&p));
+        // Other errors are the agent's outcome.
+        std::fs::write(
+            &p,
+            "{\"type\":\"error\",\"error\":{\"message\":\"context length exceeded\"}}\n",
+        )
+        .unwrap();
+        assert!(!ended_on_transport_error(&p));
     }
 }

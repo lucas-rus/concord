@@ -229,6 +229,15 @@ impl WatchState {
                 let msg = s(&d, "error");
                 self.warn(t, format!("error     {who}: {}", msg.lines().next().unwrap_or("")));
             }
+            "transport_retry" => {
+                let who = s(&d, "agent");
+                let n = d.get("attempt").and_then(Value::as_u64).unwrap_or(0);
+                self.agent(&who, t);
+                self.say(
+                    t,
+                    format!("network   {who}: connection to the model provider lost, resuming (attempt {n})"),
+                );
+            }
             "agent_exit" => {
                 let who = s(&d, "agent");
                 let error = d.get("error").and_then(Value::as_bool).unwrap_or(false);
