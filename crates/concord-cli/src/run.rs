@@ -263,6 +263,8 @@ fn spawn_agent(
         .stderr(std::fs::File::create(&err)?)
         .spawn()
         .with_context(|| format!("starting {} for agent {name}", cfg.claude))?;
+    // For `concord watch`: an agent thinking is alive; a vanished one crashed.
+    let _ = std::fs::write(out.with_file_name(format!("{name}.pid")), child.id().to_string());
     Ok(Running {
         name: name.to_owned(),
         proc: Proc::Child(child),
@@ -441,6 +443,10 @@ impl OpencodeJob {
         let Ok(mut child) = cmd.spawn() else {
             return ((None, String::new(), 0.0, false), false);
         };
+        let _ = std::fs::write(
+            PathBuf::from(format!("{}.pid", self.log_prefix.display())),
+            child.id().to_string(),
+        );
         // Watchdog: kill a turn that produces no output for OPENCODE_IDLE.
         let mut last_len = 0u64;
         let mut last_change = Instant::now();

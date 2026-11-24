@@ -24,8 +24,17 @@ const STALE_SECS: u64 = 600;
 /// every `run::HEARTBEAT`).
 const HEARTBEAT_STALE: u64 = 15;
 
-/// A working agent without any event for this long is shown as quiet.
-const QUIET_SECS: f64 = 300.0;
+/// Agents think between actions; after this long the dashboard shows how
+/// long ago the last action was (neutral, not a warning).
+const QUIET_SECS: f64 = 60.0;
+
+/// An agent whose process is alive but without an action for this long is
+/// highlighted (a hint only: long reasoning is legitimate).
+const LONG_QUIET_SECS: f64 = 1200.0;
+
+/// An agent in the working state whose process has vanished for this long
+/// has crashed (OpenCode agents have no process for a moment between turns).
+const GONE_SECS: f64 = 30.0;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum AgentState {
@@ -68,6 +77,8 @@ pub struct WatchState {
     pub heartbeat: Option<u64>,
     /// Problems worth a look: errors, failed agents, block-limit passes.
     pub warnings: Vec<(f64, String)>,
+    /// Whether each agent's process is alive (if `concord run` recorded it).
+    pub alive: BTreeMap<String, bool>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -273,6 +284,7 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
         paint("2", &format!("{} · {status}", mmss(st.elapsed)))
     );
     let width = st.agents.keys().map(String::len).max().unwrap_or(5).max(5);
+    let mut gone: Vec<String> = Vec::new();
     let _ = writeln!(
         out,
         "\n  {:width$}  {:<34} {:>5} {:>7} {:>6} {:>8} {:>8} {:>6}",
@@ -288,8 +300,17 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             AgentState::Exited => ("exited without finishing".to_owned(), "31"),
         };
         let quiet = now - a.last;
-        let (state, code) = if a.state == AgentState::Working && st.idle.is_some() && quiet > QUIET_SECS {
-            (format!("working, quiet {}", mmss(quiet)), "33")
+        let alive = st.alive.get(name).copied();
+        let (state, code) = if a.state == AgentState::Working && st.idle.is_some() && !st.done {
+            match alive {
+                Some(false) if quiet > GONE_SECS => {
+                    gone.push(name.clone());
+                    ("process gone: crashed?".to_owned(), "31;1")
+                }
+                _ if quiet > LONG_QUIET_SECS => (format!("no action for {}", mmss(quiet)), "33"),
+                _ if quiet > QUIET_SECS => (format!("working, last action {} ago", mmss(quiet)), "36"),
+                _ => (state, code),
+            }
         } else {
             (state, code)
         };
@@ -310,13 +331,13 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             a.merges
         );
     }
-    if !st.warnings.is_empty() {
-        let _ = writeln!(
-            out,
-            "\n  {}",
-            paint("31;1", &format!("{} warning(s)", st.warnings.len()))
-        );
-        for (t, line) in st.warnings.iter().rev().take(5).rev() {
+    let mut warnings: Vec<(f64, String)> = st.warnings.clone();
+    for g in &gone {
+        warnings.push((now, format!("gone      {g}: its process ended without an exit record")));
+    }
+    if !warnings.is_empty() {
+        let _ = writeln!(out, "\n  {}", paint("31;1", &format!("{} warning(s)", warnings.len())));
+        for (t, line) in warnings.iter().rev().take(5).rev() {
             let _ = writeln!(out, "  {}  {}", paint("2", &mmss(*t)), paint("31", line));
         }
     }
@@ -362,6 +383,54 @@ fn known_agents(run: &Path) -> Vec<String> {
     names
 }
 
+/// The newest recorded process id per agent (`agents/<name>[.<n>].pid`).
+fn agent_pids(run: &Path) -> BTreeMap<String, u32> {
+    let mut best: BTreeMap<String, (std::time::SystemTime, u32)> = BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(run.join("agents")) else {
+        return BTreeMap::new();
+    };
+    for e in rd.filter_map(|e| e.ok()) {
+        let file = e.file_name().to_string_lossy().into_owned();
+        let Some(stem) = file.strip_suffix(".pid") else {
+            continue;
+        };
+        let name = stem.split('.').next().unwrap_or(stem).to_owned();
+        let Some(pid) = std::fs::read_to_string(e.path())
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        else {
+            continue;
+        };
+        let Ok(m) = e.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.get(&name).is_none_or(|(t, _)| m > *t) {
+            best.insert(name, (m, pid));
+        }
+    }
+    best.into_iter().map(|(n, (_, p))| (n, p)).collect()
+}
+
+/// Which agents' processes are alive (one `ps` call).
+fn alive_agents(run: &Path) -> BTreeMap<String, bool> {
+    let pids = agent_pids(run);
+    if pids.is_empty() {
+        return BTreeMap::new();
+    }
+    let list: Vec<String> = pids.values().map(u32::to_string).collect();
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-o", "pid=", "-p", &list.join(",")])
+        .output()
+    else {
+        return BTreeMap::new();
+    };
+    let live: std::collections::BTreeSet<u32> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    pids.into_iter().map(|(n, p)| (n, live.contains(&p))).collect()
+}
+
 /// Follow a run until it completes (or once, with `once`).
 pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
     let run = resolve(dir)?;
@@ -385,6 +454,7 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
             st.apply(line.trim_end());
         }
         st.done = run.join("report.json").exists();
+        st.alive = alive_agents(&run);
         st.heartbeat = std::fs::metadata(run.join("heartbeat"))
             .and_then(|m| m.modified())
             .ok()
@@ -494,14 +564,28 @@ mod tests {
     }
 
     #[test]
-    fn quiet_agents_are_flagged() {
+    fn thinking_is_not_a_warning_but_a_vanished_process_is() {
         let mut st = fold(&[
             r#"{"t":10.0,"event":"footprint","data":{"agent":"a"}}"#,
             r#"{"t":400.0,"event":"footprint","data":{"agent":"b"}}"#,
         ]);
         st.idle = Some(5);
+        // `a` has been thinking for 6.5 minutes with its process alive.
+        st.alive = [("a".to_owned(), true), ("b".to_owned(), true)].into();
         let screen = render(&st, "run", false);
-        assert!(screen.contains("working, quiet 06:35"), "{screen}");
+        assert!(screen.contains("working, last action 06:35 ago"), "{screen}");
+        assert!(!screen.contains("warning"), "{screen}");
+        // Its process vanished: that is a crash.
+        st.alive.insert("a".into(), false);
+        let screen = render(&st, "run", false);
+        assert!(screen.contains("process gone: crashed?"), "{screen}");
+        assert!(screen.contains("1 warning(s)"), "{screen}");
+        // Very long silence with a live process is only a hint.
+        st.alive.insert("a".into(), true);
+        st.idle = Some(1300);
+        let screen = render(&st, "run", false);
+        assert!(screen.contains("no action for"), "{screen}");
+        assert!(!screen.contains("warning"), "{screen}");
     }
 
     #[test]
