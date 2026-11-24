@@ -107,12 +107,21 @@ fn colliding_appends_need_no_coordination_and_are_combined_at_integration() {
     assert!(!repo.merge_tree("b/owner", "b/yielder").unwrap().clean);
     let owner_head = repo.rev_parse("b/owner").unwrap();
     let yielder_head = repo.rev_parse("b/yielder").unwrap();
-    let found = concord_cli::regions::conflicts(&repo, &yielder_head, &owner_head);
+    let found = concord_cli::regions::conflicts(&repo, &owner_head, &yielder_head);
     assert!(!found.is_empty() && found.iter().all(concord_cli::regions::insert_only));
     let files: Vec<String> = found.into_iter().map(|f| f.file).collect();
-    let m = Repo::merge_into_union(yielder_wt, &owner_head, "integrate", &files).unwrap();
+    // Integration merges later branches into earlier ones: ours (the owner)
+    // first.
+    let m = Repo::merge_into_union(
+        owner_wt,
+        &yielder_head,
+        "integrate",
+        &files,
+        &concord_cli::regions::parses,
+    )
+    .unwrap();
     assert!(m.clean);
-    let merged = fs::read_to_string(yielder_wt.join("m.py")).unwrap();
+    let merged = fs::read_to_string(owner_wt.join("m.py")).unwrap();
     assert!(merged.contains("def c():") && merged.contains("def d():"), "{merged}");
     assert!(
         merged.find("def c():") < merged.find("def d():"),

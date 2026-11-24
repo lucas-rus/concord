@@ -796,7 +796,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
             let found = crate::regions::conflicts(&repo, &ihead, &head);
             if !found.is_empty() && found.iter().all(crate::regions::insert_only) {
                 let files: Vec<String> = found.into_iter().map(|f| f.file).collect();
-                m = Repo::merge_into_union(&iwt, &head, &msg, &files)?;
+                m = Repo::merge_into_union(&iwt, &head, &msg, &files, &crate::regions::parses)?;
                 if m.clean {
                     integration.unions.insert(name.clone(), files);
                 }

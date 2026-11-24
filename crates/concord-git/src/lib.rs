@@ -104,6 +104,108 @@ pub fn parse_hunks(diff: &str) -> Vec<Hunk> {
     hunks
 }
 
+/// Line hunks that turn `base` into `side` (`git diff --no-index -U0`).
+pub fn text_hunks(base: &str, side: &str) -> Result<Vec<Hunk>> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "concord-hunks-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir)?;
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    std::fs::write(&a, base)?;
+    std::fs::write(&b, side)?;
+    let out = Command::new("git")
+        .current_dir(&dir)
+        .args(["diff", "--no-index", "--no-color", "-U0", "--"])
+        .arg(&a)
+        .arg(&b)
+        .output();
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out?;
+    // Exit status 1 means "files differ".
+    if !(out.status.success() || out.status.code() == Some(1)) {
+        return Err(GitError::Command {
+            args: "diff --no-index".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    Ok(parse_hunks(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Three-way merge of line hunks in which the only allowed overlap is two
+/// insertions at the same point: each insertion is kept whole, `ours` first.
+/// Any other overlap, or adjacency (which git also treats as a conflict),
+/// returns None. Unlike `git merge-file --union`, lines that happen to be
+/// equal inside the two insertions are never interleaved.
+pub fn union_insertions(base: &str, ours: &[Hunk], theirs: &[Hunk]) -> Option<String> {
+    struct Op<'a> {
+        start: usize,
+        end: usize,
+        lines: &'a [String],
+        side: u8,
+    }
+    fn op(h: &Hunk, side: u8) -> Op<'_> {
+        let (start, end) = if h.old_count == 0 {
+            (h.old_start as usize, h.old_start as usize)
+        } else {
+            let s = h.old_start as usize - 1;
+            (s, s + h.old_count as usize)
+        };
+        Op {
+            start,
+            end,
+            lines: &h.new_lines,
+            side,
+        }
+    }
+    fn build<'a>(base: &str, mut ops: Vec<Op<'a>>) -> Option<String> {
+        let base_lines: Vec<&str> = base.lines().collect();
+        ops.sort_by_key(|o| (o.start, o.end != o.start, o.side));
+        let mut out: Vec<&str> = Vec::new();
+        let mut pos = 0usize;
+        let mut i = 0;
+        while i < ops.len() {
+            let o = &ops[i];
+            if o.start < pos || o.start > base_lines.len() {
+                return None;
+            }
+            out.extend(&base_lines[pos..o.start]);
+            if o.start == o.end {
+                // Insertions at this point, ours first; then nothing else of
+                // the other side may start here.
+                let mut j = i;
+                while j < ops.len() && ops[j].start == o.start && ops[j].start == ops[j].end {
+                    out.extend(ops[j].lines.iter().map(String::as_str));
+                    j += 1;
+                }
+                if j < ops.len() && ops[j].start == o.start && ops[i..j].iter().any(|x| x.side != ops[j].side) {
+                    return None;
+                }
+                pos = o.start;
+                i = j;
+            } else {
+                if ops[i + 1..].iter().any(|x| x.side != o.side && x.start <= o.end) {
+                    return None;
+                }
+                out.extend(o.lines.iter().map(String::as_str));
+                pos = o.end;
+                i += 1;
+            }
+        }
+        out.extend(&base_lines[pos.min(base_lines.len())..]);
+        let mut text = out.join("\n");
+        if !out.is_empty() {
+            text.push('\n');
+        }
+        Some(text)
+    }
+    let mut ops: Vec<Op> = ours.iter().map(|h| op(h, 0)).collect();
+    ops.extend(theirs.iter().map(|h| op(h, 1)));
+    build(base, ops)
+}
+
 #[derive(Clone, Debug)]
 pub struct Repo {
     root: PathBuf,
@@ -322,14 +424,16 @@ impl Repo {
     /// Merge `rev` into the worktree, leaving conflict markers in place for the
     /// agent to resolve (no abort). Returns the conflicted files.
     /// Merge `rev` into the worktree's branch like `merge_into`, but resolve the
-    /// conflicts in `union_files` by keeping both sides' lines, `rev`'s first
-    /// (git's union merge, restricted to files the caller classified as
-    /// insert/insert collisions). Any other conflict aborts the merge.
+    /// conflicts in `union_files` by keeping both sides' insertions whole, the
+    /// worktree's (ours) first ([`union_insertions`]). Each resolved file must
+    /// pass `verify(path, content)` (e.g. it still parses). Any other conflict,
+    /// or a failed check, aborts the merge.
     pub fn merge_into_union(
         worktree: &Path,
         rev: &str,
         message: &str,
         union_files: &[String],
+        verify: &dyn Fn(&str, &str) -> bool,
     ) -> Result<MergeIntoOutcome> {
         let mut args: Vec<&str> = IDENTITY.to_vec();
         args.extend(["merge", "--no-ff", "--no-commit", rev]);
@@ -357,34 +461,14 @@ impl Repo {
         if files.iter().any(|f| !union_files.contains(f)) {
             return abort(files);
         }
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "concord-union-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir)?;
         let result = (|| -> Result<()> {
             for f in &files {
                 let stage = |n: u8| run(worktree, &["show", &format!(":{n}:{f}")], None).unwrap_or_default();
-                let (base, ours, theirs) = (dir.join("base"), dir.join("ours"), dir.join("theirs"));
-                std::fs::write(&base, stage(1))?;
-                std::fs::write(&ours, stage(2))?;
-                std::fs::write(&theirs, stage(3))?;
-                let out = Command::new("git")
-                    .current_dir(worktree)
-                    .args(["merge-file", "--union", "-p"])
-                    .arg(&theirs)
-                    .arg(&base)
-                    .arg(&ours)
-                    .output()?;
-                if !out.status.success() {
-                    return Err(GitError::Command {
-                        args: "merge-file --union".into(),
-                        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                    });
-                }
-                std::fs::write(worktree.join(f), &out.stdout)?;
+                let (base, ours, theirs) = (stage(1), stage(2), stage(3));
+                let merged = union_insertions(&base, &text_hunks(&base, &ours)?, &text_hunks(&base, &theirs)?)
+                    .filter(|m| verify(f, m))
+                    .ok_or_else(|| GitError::Parse(format!("{f}: not a clean union of insertions")))?;
+                std::fs::write(worktree.join(f), merged)?;
                 run(worktree, &["add", "--", f], None)?;
             }
             let mut args: Vec<&str> = IDENTITY.to_vec();
@@ -392,7 +476,6 @@ impl Repo {
             run(worktree, &args, None)?;
             Ok(())
         })();
-        let _ = std::fs::remove_dir_all(&dir);
         match result {
             Ok(()) => Ok(MergeIntoOutcome {
                 clean: true,
@@ -609,6 +692,52 @@ mod tests {
                 .split_whitespace()
                 .count(),
             3
+        );
+    }
+
+    #[test]
+    fn union_keeps_each_insertion_whole() {
+        // Two classes inserted at the same point, with identical lines inside
+        // them: git merge-file --union interleaves those, which broke the
+        // syntax in a real run. Each insertion must stay one block.
+        let base = "class A:\n    pass\n";
+        let ours = format!("{base}\n\nclass B(T):\n    @staticmethod\n    def f(x):\n        return 1\n");
+        let theirs = format!("{base}\n\nclass C(T):\n    @staticmethod\n    def f(x):\n        return 2\n");
+        let merged = union_insertions(
+            base,
+            &text_hunks(base, &ours).unwrap(),
+            &text_hunks(base, &theirs).unwrap(),
+        )
+        .unwrap();
+        let b = merged.find("class B").unwrap();
+        let c = merged.find("class C").unwrap();
+        assert!(b < c, "{merged}");
+        assert!(
+            merged[b..c].contains("return 1") && !merged[b..c].contains("return 2"),
+            "{merged}"
+        );
+        assert!(merged[c..].contains("return 2"), "{merged}");
+        // A modification next to the other side's insertion is not a union.
+        let modified = base.replace("pass", "x = 1");
+        assert_eq!(
+            union_insertions(
+                base,
+                &text_hunks(base, &modified).unwrap(),
+                &text_hunks(base, &theirs).unwrap()
+            ),
+            None
+        );
+        // Disjoint changes are applied as they are.
+        let top = format!("import os\n{base}");
+        let both = union_insertions(
+            base,
+            &text_hunks(base, &top).unwrap(),
+            &text_hunks(base, &theirs).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            both.starts_with("import os\nclass A:") && both.contains("class C"),
+            "{both}"
         );
     }
 

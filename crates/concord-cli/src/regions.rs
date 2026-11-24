@@ -89,6 +89,17 @@ pub fn insert_only(f: &FileConflict) -> bool {
             .all(|t| f.mine.iter().any(|m| m.old_start == t.old_start))
 }
 
+/// Whether a file's content still parses (Python, TypeScript/JavaScript);
+/// languages Concord does not parse are accepted. Used to verify a union of
+/// insertions before it is committed.
+pub fn parses(path: &str, content: &str) -> bool {
+    match concord_lang::index_file(path, content) {
+        None => true,
+        Some(Ok(f)) => !f.has_errors,
+        Some(Err(_)) => false,
+    }
+}
+
 fn span(h: &Hunk) -> String {
     if h.old_count == 0 {
         format!("inserted after line {}", h.old_start)
@@ -354,7 +365,7 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
             if union.is_empty() {
                 Repo::merge_into(&wt, &head, &msg)
             } else {
-                Repo::merge_into_union(&wt, &head, &msg, &union)
+                Repo::merge_into_union(&wt, &head, &msg, &union, &parses)
             }
         });
         match merged {
