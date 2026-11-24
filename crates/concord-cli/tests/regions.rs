@@ -172,7 +172,7 @@ fn contract_and_region_waits_never_form_a_cycle() {
         &shared,
         "owner",
         &owner_wt,
-        &format!("{BASE2}\n\ndef c():\n    return 3\n"),
+        &format!("{BASE2}\n\ndef c():\n    return g(3)\n"),
     );
     read(&shared, "owner", &owner_wt);
     edit(
@@ -199,6 +199,17 @@ fn contract_and_region_waits_never_form_a_cycle() {
         fs::read_to_string(&log).unwrap()
     );
     assert!(reason.contains("g(x, y)") || reason.contains("g"), "{reason}");
+    // Once its own call conforms, the owner may finish at once: holding a
+    // conforming consumer for a producer that waits for it is a livelock.
+    edit(
+        &shared,
+        "owner",
+        &owner_wt,
+        &format!("{BASE2}\n\ndef c():\n    return g(3, 0)\n"),
+    );
+    let t0 = std::time::Instant::now();
+    assert_eq!(stop(&shared, "owner"), None, "{}", fs::read_to_string(&log).unwrap());
+    assert!(t0.elapsed() < Duration::from_secs(2), "owner waited {:?}", t0.elapsed());
     let _ = waiter.join().unwrap();
 }
 

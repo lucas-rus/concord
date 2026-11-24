@@ -683,6 +683,26 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
+            // The agent cannot wait (cycle, or wait budget spent). Where its own
+            // call sites already conform to the published contract, holding it
+            // cannot make progress (seen live: a consumer was blocked at once on
+            // every attempt until the block limit). Acknowledge those contracts;
+            // the producer's code is integrated later, and a later contract
+            // change makes the agent stale again (resume pass).
+            let conforming: Vec<SymbolId> = remaining
+                .iter()
+                .filter(|(s, problems)| {
+                    problems.is_empty() && st.dir.published_by(s).is_some_and(|p| running.contains(&p.0))
+                })
+                .map(|(s, _)| s.clone())
+                .collect();
+            if !conforming.is_empty() {
+                for s in &conforming {
+                    st.dir.acknowledge(&AgentId::new(agent), s);
+                    st.log("ack", json!({ "agent": agent, "symbol": s, "producer_running": true }));
+                }
+                continue;
+            }
             let mut reason = format!(
                 "[concord] {} changed contracts your code depends on and is still working, so Concord cannot merge \
                  their code yet. Do not wait, poll or schedule anything for them: adapt your own call sites to the \
