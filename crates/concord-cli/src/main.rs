@@ -99,6 +99,11 @@ enum Command {
         /// lower-ranked peer. No conflict markers, no peer merge.
         #[arg(long)]
         regions: bool,
+        /// Before an agent may finish, test its work merged with the finished
+        /// agents' work (with --test-cmd) and block on tests that fail
+        /// together but pass alone.
+        #[arg(long)]
+        fails_together: bool,
         /// Structured merge driver for merges and conflict checks, e.g. the
         /// path of `mergiraf` (called as `<CMD> merge --git %O %A %B ...`).
         #[arg(long)]
@@ -229,6 +234,7 @@ fn main() -> Result<()> {
             peer_merge,
             no_contracts,
             regions,
+            fails_together,
             merge_driver,
             resume_rounds,
             claude,
@@ -251,6 +257,7 @@ fn main() -> Result<()> {
                 peer_merge,
                 contracts: !no_contracts,
                 regions,
+                fails_together,
                 merge_driver,
                 resume_rounds,
                 claude,

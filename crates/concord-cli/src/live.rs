@@ -126,6 +126,10 @@ pub struct State {
     /// layers: agent -> agents it is currently waiting for. A wait that would
     /// close a cycle is never entered (no cross-layer deadlock).
     pub(crate) waiting: BTreeMap<String, BTreeSet<String>>,
+    /// Fails-together check at the finish gate: the test command, if enabled.
+    pub together: Option<String>,
+    /// Last fails-together verdict per agent, keyed by (snapshot, peers).
+    together_cache: HashMap<String, (String, crate::together::Verdict)>,
     revisions: HashMap<String, Arc<Snapshot>>,
     log: Option<std::fs::File>,
     started: Instant,
@@ -158,6 +162,8 @@ impl State {
             region_alerted: BTreeSet::new(),
             region_yields: BTreeSet::new(),
             waiting: BTreeMap::new(),
+            together: None,
+            together_cache: HashMap::new(),
             revisions: HashMap::new(),
             log,
             started: Instant::now(),
@@ -649,6 +655,62 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     a.stats.gate_blocks += 1;
                 }
                 return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+            }
+            if let Some(cmd) = st.together.clone() {
+                // Fails together: test the merge with finished peers (outside
+                // the state lock, so other agents' hooks are not delayed).
+                let wt = st.agents[agent].worktree.clone();
+                let me = Repo::snapshot_worktree(&wt).unwrap_or_default();
+                let finished: Vec<(String, PathBuf, String)> = st
+                    .agents
+                    .values()
+                    .filter(|p| p.name != agent && p.status == Status::Finished)
+                    .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
+                    .collect();
+                let mut peers = Vec::new();
+                for (name, p_wt, branch) in finished {
+                    let _ = Repo::commit_all(&p_wt, &format!("agent {name}: work committed by concord"));
+                    if let Ok(h) = st.repo.rev_parse(&branch) {
+                        peers.push((name, h));
+                    }
+                }
+                let key = format!("{me}:{peers:?}");
+                let cached = st
+                    .together_cache
+                    .get(agent)
+                    .filter(|(k, _)| *k == key)
+                    .map(|(_, v)| v.clone());
+                let verdict = match cached {
+                    Some(v) => v,
+                    None if me.is_empty() => crate::together::Verdict::Skipped("no snapshot".into()),
+                    None => {
+                        let repo = st.repo.clone();
+                        drop(st);
+                        let v = crate::together::check(&repo, &cmd, &me, &peers);
+                        st = shared.lock().expect("state");
+                        st.together_cache.insert(agent.to_owned(), (key, v.clone()));
+                        v
+                    }
+                };
+                match &verdict {
+                    crate::together::Verdict::FailsTogether { tests, .. } => {
+                        let text = crate::together::render(&st.repo, &st.base, &peers, &verdict);
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.stats.gate_blocks += 1;
+                        }
+                        st.log(
+                            "stop",
+                            json!({ "agent": agent, "decision": "block", "reason": "fails_together", "tests": tests }),
+                        );
+                        return (json!({ "decision": "block", "reason": text }).to_string(), 0);
+                    }
+                    crate::together::Verdict::Skipped(why) => {
+                        st.log("together_skipped", json!({ "agent": agent, "why": why }));
+                    }
+                    crate::together::Verdict::Clean => {
+                        st.log("together_clean", json!({ "agent": agent, "peers": peers.len() }));
+                    }
+                }
             }
             st.log("stop", json!({ "agent": agent, "decision": "allow" }));
             finish(&mut st, agent);

@@ -1,0 +1,102 @@
+//! Fails-together check of the finish gate, end to end through the hooks: a
+//! test that passes on the agent's own work but fails once it is merged with a
+//! finished peer blocks the agent, until it adapts.
+
+use concord_cli::live::{self, Mode, Shared, State};
+use concord_git::Repo;
+use serde_json::{Value, json};
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Runs every tests/*.sh and reports failures like pytest does.
+const TEST_CMD: &str =
+    "fail=0; for t in tests/*.sh; do sh \"$t\" >/dev/null 2>&1 || { echo \"FAILED $t\"; fail=1; }; done; exit $fail";
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn write(shared: &Shared, agent: &str, wt: &Path, file: &str, text: &str) {
+    let path = wt.join(file);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, text).unwrap();
+    let input = json!({
+        "session_id": format!("s-{agent}"),
+        "tool_name": "Write",
+        "tool_input": { "file_path": path.to_string_lossy() },
+    });
+    live::handle(shared, agent, "PostToolUse", &input);
+}
+
+fn stop(shared: &Shared, agent: &str) -> Option<String> {
+    let (out, _) = live::handle(shared, agent, "Stop", &json!({ "session_id": format!("s-{agent}") }));
+    if out.is_empty() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&out).unwrap();
+    Some(v["reason"].as_str().unwrap().to_owned())
+}
+
+#[test]
+fn a_test_that_fails_together_blocks_until_fixed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(root.join("tests")).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("value.txt"), "1\n").unwrap();
+    fs::write(root.join("tests/base.sh"), "test -f value.txt\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        None,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+    st.regions = true;
+    st.together = Some(TEST_CMD.to_owned());
+    let mut wts = Vec::new();
+    for name in ["a", "b"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+
+    // A changes the value (and tests the new one); B relies on the old value.
+    write(&shared, "a", &wts[0], "value.txt", "2\n");
+    write(&shared, "a", &wts[0], "tests/a.sh", "grep -qx 2 value.txt\n");
+    write(&shared, "b", &wts[1], "tests/b.sh", "grep -qx 1 value.txt\n");
+
+    // A finishes first: nothing finished to merge with.
+    assert_eq!(stop(&shared, "a"), None);
+    // B passes alone but fails together with A: blocked, with the test named.
+    let reason = stop(&shared, "b").expect("fails together");
+    assert!(
+        reason.contains("fails together") && reason.contains("tests/b.sh"),
+        "{reason}"
+    );
+    assert!(reason.contains("`a`") && reason.contains("value.txt"), "{reason}");
+    // B adapts to A's change and may finish.
+    write(&shared, "b", &wts[1], "tests/b.sh", "grep -qx 2 value.txt\n");
+    assert_eq!(stop(&shared, "b"), None);
+}

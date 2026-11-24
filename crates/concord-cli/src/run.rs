@@ -43,6 +43,8 @@ pub struct RunConfig {
     pub contracts: bool,
     /// Region coherence (see `live::State::regions`).
     pub regions: bool,
+    /// Fails-together check at the finish gate (see `together`), with `test_cmd`.
+    pub fails_together: bool,
     /// Structured merge driver executable (Mergiraf-compatible CLI).
     pub merge_driver: Option<String>,
     pub resume_rounds: u32,
@@ -600,6 +602,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
     state.peer_merge = cfg.peer_merge;
     state.contracts = cfg.contracts;
     state.regions = cfg.regions;
+    state.together = cfg.fails_together.then(|| cfg.test_cmd.clone());
     if let Some(cmd) = &cfg.merge_driver {
         let driver = format!("{cmd} merge --git %O %A %B -s %S -x %X -y %Y -p %P -l %L");
         repo.set_merge_driver("concord-structured", &driver, STRUCTURED_MERGE_PATTERNS)?;
