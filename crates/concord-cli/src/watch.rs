@@ -24,13 +24,16 @@ const STALE_SECS: u64 = 600;
 /// every `run::HEARTBEAT`).
 const HEARTBEAT_STALE: u64 = 15;
 
-/// Agents think between actions; after this long the dashboard shows how
-/// long ago the last action was (neutral, not a warning).
+/// Agents think between actions; after this long without an event the
+/// dashboard says what the agent is doing instead.
 const QUIET_SECS: f64 = 60.0;
 
-/// An agent whose process is alive but without an action for this long is
-/// highlighted (a hint only: long reasoning is legitimate).
-const LONG_QUIET_SECS: f64 = 1200.0;
+/// CPU use or output this recent counts as the agent being active.
+const ACTIVE_SECS: u64 = 60;
+
+/// An agent alive but with no CPU use, no output and no command for this
+/// long has stalled.
+const STALL_SECS: u64 = 600;
 
 /// An agent in the working state whose process has vanished for this long
 /// has crashed (OpenCode agents have no process for a moment between turns).
@@ -77,8 +80,8 @@ pub struct WatchState {
     pub heartbeat: Option<u64>,
     /// Problems worth a look: errors, failed agents, block-limit passes.
     pub warnings: Vec<(f64, String)>,
-    /// Whether each agent's process is alive (if `concord run` recorded it).
-    pub alive: BTreeMap<String, bool>,
+    /// What each agent's process is doing (if `concord run` recorded it).
+    pub probes: BTreeMap<String, crate::probe::Probe>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -285,6 +288,7 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
     );
     let width = st.agents.keys().map(String::len).max().unwrap_or(5).max(5);
     let mut gone: Vec<String> = Vec::new();
+    let mut stalled: Vec<(String, u64)> = Vec::new();
     let _ = writeln!(
         out,
         "\n  {:width$}  {:<34} {:>5} {:>7} {:>6} {:>8} {:>8} {:>6}",
@@ -300,16 +304,30 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             AgentState::Exited => ("exited without finishing".to_owned(), "31"),
         };
         let quiet = now - a.last;
-        let alive = st.alive.get(name).copied();
-        let (state, code) = if a.state == AgentState::Working && st.idle.is_some() && !st.done {
-            match alive {
-                Some(false) if quiet > GONE_SECS => {
-                    gone.push(name.clone());
-                    ("process gone: crashed?".to_owned(), "31;1")
+        let (state, code) = if a.state == AgentState::Working && st.idle.is_some() && !st.done && quiet > QUIET_SECS {
+            // Silent: find out why before calling anything a failure.
+            match st.probes.get(name) {
+                None => (format!("working, last action {} ago", mmss(quiet)), "36"),
+                Some(p) if !p.alive => {
+                    if quiet > GONE_SECS {
+                        gone.push(name.clone());
+                        ("process gone: crashed?".to_owned(), "31;1")
+                    } else {
+                        (state, code)
+                    }
                 }
-                _ if quiet > LONG_QUIET_SECS => (format!("no action for {}", mmss(quiet)), "33"),
-                _ if quiet > QUIET_SECS => (format!("working, last action {} ago", mmss(quiet)), "36"),
-                _ => (state, code),
+                Some(p) => match &p.running {
+                    Some((cmd, age)) => (format!("running {cmd} ({})", mmss(*age as f64)), "36"),
+                    None if p.active_ago <= ACTIVE_SECS => (format!("thinking, last action {} ago", mmss(quiet)), "36"),
+                    None if p.active_ago > STALL_SECS => {
+                        stalled.push((name.clone(), p.active_ago));
+                        (format!("stalled {}", mmss(p.active_ago as f64)), "31;1")
+                    }
+                    None => (
+                        format!("idle {} (waiting for the model?)", mmss(p.active_ago as f64)),
+                        "33",
+                    ),
+                },
             }
         } else {
             (state, code)
@@ -334,6 +352,15 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
     let mut warnings: Vec<(f64, String)> = st.warnings.clone();
     for g in &gone {
         warnings.push((now, format!("gone      {g}: its process ended without an exit record")));
+    }
+    for (g, secs) in &stalled {
+        warnings.push((
+            now,
+            format!(
+                "stalled   {g}: no CPU use, output or command for {}",
+                mmss(*secs as f64)
+            ),
+        ));
     }
     if !warnings.is_empty() {
         let _ = writeln!(out, "\n  {}", paint("31;1", &format!("{} warning(s)", warnings.len())));
@@ -383,54 +410,6 @@ fn known_agents(run: &Path) -> Vec<String> {
     names
 }
 
-/// The newest recorded process id per agent (`agents/<name>[.<n>].pid`).
-fn agent_pids(run: &Path) -> BTreeMap<String, u32> {
-    let mut best: BTreeMap<String, (std::time::SystemTime, u32)> = BTreeMap::new();
-    let Ok(rd) = std::fs::read_dir(run.join("agents")) else {
-        return BTreeMap::new();
-    };
-    for e in rd.filter_map(|e| e.ok()) {
-        let file = e.file_name().to_string_lossy().into_owned();
-        let Some(stem) = file.strip_suffix(".pid") else {
-            continue;
-        };
-        let name = stem.split('.').next().unwrap_or(stem).to_owned();
-        let Some(pid) = std::fs::read_to_string(e.path())
-            .ok()
-            .and_then(|t| t.trim().parse().ok())
-        else {
-            continue;
-        };
-        let Ok(m) = e.metadata().and_then(|m| m.modified()) else {
-            continue;
-        };
-        if best.get(&name).is_none_or(|(t, _)| m > *t) {
-            best.insert(name, (m, pid));
-        }
-    }
-    best.into_iter().map(|(n, (_, p))| (n, p)).collect()
-}
-
-/// Which agents' processes are alive (one `ps` call).
-fn alive_agents(run: &Path) -> BTreeMap<String, bool> {
-    let pids = agent_pids(run);
-    if pids.is_empty() {
-        return BTreeMap::new();
-    }
-    let list: Vec<String> = pids.values().map(u32::to_string).collect();
-    let Ok(out) = std::process::Command::new("ps")
-        .args(["-o", "pid=", "-p", &list.join(",")])
-        .output()
-    else {
-        return BTreeMap::new();
-    };
-    let live: std::collections::BTreeSet<u32> = String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .filter_map(|p| p.parse().ok())
-        .collect();
-    pids.into_iter().map(|(n, p)| (n, live.contains(&p))).collect()
-}
-
 /// Follow a run until it completes (or once, with `once`).
 pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
     let run = resolve(dir)?;
@@ -442,6 +421,7 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
     let mut st = WatchState::default();
     let mut file = std::fs::File::open(run.join("events.jsonl"))?;
     let mut pending = String::new();
+    let mut prober = crate::probe::Prober::default();
     loop {
         for a in known_agents(&run) {
             st.add_agent(&a);
@@ -454,7 +434,7 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
             st.apply(line.trim_end());
         }
         st.done = run.join("report.json").exists();
-        st.alive = alive_agents(&run);
+        st.probes = prober.probe(&run);
         st.heartbeat = std::fs::metadata(run.join("heartbeat"))
             .and_then(|m| m.modified())
             .ok()
@@ -563,29 +543,46 @@ mod tests {
         assert!(screen.contains("FAILED: Free usage limit reached"), "{screen}");
     }
 
+    fn probe(alive: bool, running: Option<&str>, active_ago: u64) -> crate::probe::Probe {
+        crate::probe::Probe {
+            alive,
+            running: running.map(|c| (c.to_owned(), 90)),
+            active_ago,
+        }
+    }
+
     #[test]
-    fn thinking_is_not_a_warning_but_a_vanished_process_is() {
+    fn silence_is_explained_before_it_is_called_a_failure() {
         let mut st = fold(&[
             r#"{"t":10.0,"event":"footprint","data":{"agent":"a"}}"#,
             r#"{"t":400.0,"event":"footprint","data":{"agent":"b"}}"#,
         ]);
         st.idle = Some(5);
-        // `a` has been thinking for 6.5 minutes with its process alive.
-        st.alive = [("a".to_owned(), true), ("b".to_owned(), true)].into();
-        let screen = render(&st, "run", false);
-        assert!(screen.contains("working, last action 06:35 ago"), "{screen}");
-        assert!(!screen.contains("warning"), "{screen}");
-        // Its process vanished: that is a crash.
-        st.alive.insert("a".into(), false);
-        let screen = render(&st, "run", false);
-        assert!(screen.contains("process gone: crashed?"), "{screen}");
-        assert!(screen.contains("1 warning(s)"), "{screen}");
-        // Very long silence with a live process is only a hint.
-        st.alive.insert("a".into(), true);
-        st.idle = Some(1300);
-        let screen = render(&st, "run", false);
-        assert!(screen.contains("no action for"), "{screen}");
-        assert!(!screen.contains("warning"), "{screen}");
+        let screen_with = |st: &mut WatchState, p| {
+            st.probes.insert("a".into(), p);
+            render(st, "run", false)
+        };
+        // Running a command (a test suite): fine.
+        let s1 = screen_with(&mut st, probe(true, Some("python -m pytest -q"), 0));
+        assert!(s1.contains("running python -m pytest"), "{s1}");
+        assert!(!s1.contains("warning"), "{s1}");
+        // Thinking (CPU or output just now): fine.
+        let s2 = screen_with(&mut st, probe(true, None, 5));
+        assert!(s2.contains("thinking, last action 06:35 ago"), "{s2}");
+        assert!(!s2.contains("warning"), "{s2}");
+        // Alive and idle for a while (model API?): a hint, not a warning.
+        let s3 = screen_with(&mut st, probe(true, None, 200));
+        assert!(s3.contains("idle 03:20"), "{s3}");
+        assert!(!s3.contains("warning"), "{s3}");
+        // No CPU, output or command for over 10 minutes: stalled.
+        let s4 = screen_with(&mut st, probe(true, None, 700));
+        assert!(s4.contains("stalled 11:40") && s4.contains("1 warning(s)"), "{s4}");
+        // Process gone: crashed.
+        let s5 = screen_with(&mut st, probe(false, None, 0));
+        assert!(
+            s5.contains("process gone: crashed?") && s5.contains("1 warning(s)"),
+            "{s5}"
+        );
     }
 
     #[test]
