@@ -125,6 +125,31 @@ concord diff old.py new.py               # contract vs. body changes between two
 concord analyze --base main b1 b2 --json # machine-readable output (for experiments)
 ```
 
+### Watch a team live
+
+`concord watch` follows a run as it happens: what each agent is doing, who waits for whom, and every coordination step Concord takes.
+
+```bash
+concord watch runs/            # the most recent run under the --out of `concord run`
+concord watch runs/ --once     # one snapshot, e.g. for a log
+```
+
+```text
+concord  1795518603-enforce-463d82  1/12 finished  03:07 · running
+
+  agent             state                              edits notices blocks hand-off combined merges
+  code-spans        finished                               4       0      0        0        0      0
+  emphasis          working                                8       0      0        0        0      0
+  images-autolinks  working                                2       0      0        0        1      0
+  lists             working                                5       0      0        0        1      0
+  ...
+
+  coordination
+  02:26  region    raw-html-breaks yields src/cmark/inlines.py to code-spans
+  02:36  combine   lists + headings add at the same place in src/cmark/blocks.py
+  02:59  done      code-spans finished
+```
+
 ## Results with real agents
 
 **A small project built by a team.** Three Haiku agents build [`conta`](examples/conta) (an offline version of a Romanian invoice-processing pipeline) over three milestones, each split into three parallel tickets in which one agent changes an interface the others use. Hidden acceptance tests, validated against a reference solution, check the integrated result. 3 runs per condition ([eval/project](eval/project)):

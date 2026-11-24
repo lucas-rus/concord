@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod regions;
 pub mod report;
 pub mod run;
+pub mod watch;
 
 use anyhow::{Context, Result};
 use concord_core::{

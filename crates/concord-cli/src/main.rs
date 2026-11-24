@@ -128,6 +128,20 @@ enum Command {
         #[arg(long, default_value = "opencode/qwen4-max-free")]
         model: String,
     },
+    /// Live view of a coordinated run: each agent's state (working, waiting for
+    /// whom, held by the finish gate, finished) and Concord's coordination
+    /// events (notices, region hand-offs, combined insertions, merges).
+    Watch {
+        /// A run directory (with events.jsonl), or a directory of runs (the
+        /// most recent one is shown), e.g. the `--out` of `concord run`.
+        dir: PathBuf,
+        /// Print one snapshot and exit.
+        #[arg(long)]
+        once: bool,
+        /// Refresh interval in milliseconds.
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+    },
     /// Hook entry point (configured by `concord run`): forwards the hook input
     /// on stdin to the daemon and prints its answer.
     Hook {
@@ -254,6 +268,9 @@ fn main() -> Result<()> {
                 model,
                 concord_exe: std::env::current_exe()?,
             })?;
+        }
+        Command::Watch { dir, once, interval_ms } => {
+            concord_cli::watch::watch(&dir, once, Duration::from_millis(interval_ms))?;
         }
         Command::Hook { addr, agent, event } => {
             std::process::exit(live::hook_client(&addr, &agent, &event));
