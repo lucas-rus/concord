@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 pub struct Task {
     pub name: String,
     pub prompt: String,
+    /// Acceptance check of the ticket (a shell command run in the agent's
+    /// worktree), e.g. the tests of its own feature. The finish gate sends the
+    /// agent back while it fails and the agent is still making progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
 }
 
 /// Files handed to the structured merge driver (languages Mergiraf supports
@@ -69,6 +74,9 @@ pub enum AgentCli {
 
 const OPENCODE_PLUGIN: &str = include_str!("opencode_plugin.js");
 /// A turn producing no output for this long is considered hung.
+/// Time allowed for a ticket's acceptance check (seconds).
+pub const CHECK_TIMEOUT_SECS: u64 = 300;
+
 /// Interval of the run's heartbeat file (read by `concord watch`).
 pub const HEARTBEAT: Duration = Duration::from_secs(5);
 
@@ -91,6 +99,9 @@ pub struct AgentResult {
     pub resumed: u32,
     pub notices_delivered: u32,
     pub gate_blocks: u32,
+    /// Times the acceptance check sent the agent back.
+    #[serde(default)]
+    pub check_blocks: u32,
     pub merges: Vec<String>,
     pub merge_conflicts: Vec<String>,
     pub tests_alone_passed: Option<bool>,
@@ -157,9 +168,9 @@ fn uuid_v4() -> String {
     )
 }
 
-fn settings_json(cfg: &RunConfig, addr: &str, agent: &str) -> Value {
+fn settings_json(cfg: &RunConfig, addr: &str, agent: &str, check: bool) -> Value {
     let mut settings = json!({ "permissions": { "allow": cfg.allowed_tools, "deny": DENIED_TOOLS } });
-    if cfg.mode == Mode::Off {
+    if cfg.mode == Mode::Off && !check {
         return settings;
     }
     let exe = cfg.concord_exe.to_string_lossy().into_owned();
@@ -171,10 +182,16 @@ fn settings_json(cfg: &RunConfig, addr: &str, agent: &str) -> Value {
             "timeout": timeout
         })
     };
-    settings["hooks"] = json!({
-        "PostToolUse": [{ "matcher": "*", "hooks": [hook("PostToolUse", 120)] }],
-        "Stop": [{ "hooks": [hook("Stop", cfg.max_wait.as_secs() + 300)] }]
-    });
+    // Without coordination only the finish gate is installed, for the
+    // ticket's acceptance check.
+    settings["hooks"] = if cfg.mode == Mode::Off {
+        json!({ "Stop": [{ "hooks": [hook("Stop", CHECK_TIMEOUT_SECS)] }] })
+    } else {
+        json!({
+            "PostToolUse": [{ "matcher": "*", "hooks": [hook("PostToolUse", 120)] }],
+            "Stop": [{ "hooks": [hook("Stop", cfg.max_wait.as_secs() + CHECK_TIMEOUT_SECS)] }]
+        })
+    };
     settings
 }
 
@@ -331,7 +348,9 @@ fn spawn_opencode(
     let job = OpencodeJob {
         exe: cfg.opencode.clone(),
         model: cfg.model.clone(),
-        gate: cfg.mode == Mode::Enforce,
+        // OpenCode has no hooks: the controller asks the gate after each turn
+        // (in off mode it only runs the ticket's acceptance check, if any).
+        gate: true,
         cfg_dir,
         worktree: agent.worktree.to_path_buf(),
         shared: agent.shared.clone(),
@@ -630,6 +649,9 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         let wt = run_dir.join("wt").join(&t.name);
         repo.worktree_add(&wt, &branch, &base)?;
         state.add_agent(&t.name, wt.clone(), branch, &t.prompt);
+        if let Some(a) = state.agents.get_mut(&t.name) {
+            a.check = t.check.clone();
+        }
         worktrees.insert(t.name.clone(), wt);
     }
     state.peer_merge = cfg.peer_merge;
@@ -668,7 +690,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         let settings = agents_dir.join(format!("{}.settings.json", t.name));
         std::fs::write(
             &settings,
-            serde_json::to_string_pretty(&settings_json(cfg, &addr, &t.name))?,
+            serde_json::to_string_pretty(&settings_json(cfg, &addr, &t.name, t.check.is_some()))?,
         )?;
         let sid = uuid_v4();
         running.push(spawn_agent(
@@ -754,6 +776,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
             if let Some(a) = st.agents.get(name) {
                 r.notices_delivered = a.stats.notices_delivered;
                 r.gate_blocks = a.stats.gate_blocks;
+                r.check_blocks = a.stats.check_blocks;
                 r.merges = a.stats.merges.clone();
                 r.merge_conflicts = a.stats.merge_conflicts.clone();
             }

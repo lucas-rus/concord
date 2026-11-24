@@ -100,3 +100,41 @@ fn a_test_that_fails_together_blocks_until_fixed() {
     write(&shared, "b", &wts[1], "tests/b.sh", "grep -qx 2 value.txt\n");
     assert_eq!(stop(&shared, "b"), None);
 }
+
+/// The ticket's acceptance check, also without coordination: the agent is
+/// sent back while the check fails and it makes progress, and may finish when
+/// the check passes or stops improving.
+#[test]
+fn acceptance_check_sends_the_agent_back_while_it_makes_progress() {
+    const CHECK: &str = "fail=0; for f in a b; do [ -f $f ] || { echo \"FAILED t::$f\"; fail=1; }; done; exit $fail";
+    for finish_all in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        fs::write(root.join("README"), "x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        let repo = Repo::open(&root).unwrap();
+        let base = repo.rev_parse("HEAD").unwrap();
+        let mut st = State::new(repo.clone(), base.clone(), Mode::Off, None, Duration::from_millis(200)).unwrap();
+        let wt = tmp.path().join("wt").join("a");
+        repo.worktree_add(&wt, "b/a", &base).unwrap();
+        st.add_agent("a", wt.clone(), "b/a".into(), "task");
+        st.agents.get_mut("a").unwrap().check = Some(CHECK.to_owned());
+        let shared: Shared = Arc::new(Mutex::new(st));
+
+        // Two failures: sent back, with the failing checks named.
+        let reason = stop(&shared, "a").expect("check fails");
+        assert!(reason.contains("t::a") && reason.contains("t::b"), "{reason}");
+        // One fixed: progress, sent back again.
+        write(&shared, "a", &wt, "a", "");
+        assert!(stop(&shared, "a").is_some());
+        if finish_all {
+            // All fixed: may finish.
+            write(&shared, "a", &wt, "b", "");
+        }
+        // Passing, or no progress since the last attempt: may finish.
+        assert_eq!(stop(&shared, "a"), None, "finish_all={finish_all}");
+    }
+}

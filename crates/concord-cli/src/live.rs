@@ -69,6 +69,8 @@ pub struct AgentStats {
     pub merge_conflicts: Vec<String>,
     /// Region conflicts this agent was told to yield.
     pub region_conflicts: u32,
+    /// Times the ticket's acceptance check sent the agent back.
+    pub check_blocks: u32,
 }
 
 #[derive(Debug)]
@@ -94,6 +96,10 @@ pub struct AgentInfo {
     pub snapshot: Option<String>,
     /// Region notices waiting to be delivered.
     pub region_notes: Vec<String>,
+    /// The ticket's acceptance check (shell command), if any.
+    pub check: Option<String>,
+    /// Failures of the last acceptance check that sent the agent back.
+    pub check_failures: Option<usize>,
 }
 
 struct Snapshot {
@@ -192,6 +198,8 @@ impl State {
                 rank,
                 snapshot: None,
                 region_notes: Vec::new(),
+                check: None,
+                check_failures: None,
             },
         );
     }
@@ -555,6 +563,89 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
     }
 }
 
+/// Most times the acceptance check sends an agent back.
+pub const MAX_CHECK_BLOCKS: u32 = 3;
+
+/// The ticket's acceptance check at the finish gate. Runs the check in the
+/// agent's worktree (outside the state lock) and sends the agent back while it
+/// fails, as long as the agent is making progress: the first failure, or
+/// fewer failures than the last time, at most `MAX_CHECK_BLOCKS` times. A
+/// failure that does not shrink is taken to be out of the agent's reach (e.g.
+/// examples that depend on another ticket), and the agent may finish.
+fn check_gate<'a>(
+    shared: &'a Shared,
+    st: std::sync::MutexGuard<'a, State>,
+    agent: &str,
+) -> (std::sync::MutexGuard<'a, State>, Option<String>) {
+    let Some(a) = st.agents.get(agent) else {
+        return (st, None);
+    };
+    let Some(cmd) = a.check.clone() else { return (st, None) };
+    let wt = a.worktree.clone();
+    drop(st);
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .current_dir(&wt)
+        .output();
+    let mut st = shared.lock().expect("state");
+    let (ok, text) = match out {
+        Ok(o) => {
+            let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
+            t.push_str(&String::from_utf8_lossy(&o.stderr));
+            (o.status.success(), t)
+        }
+        Err(e) => {
+            st.log(
+                "error",
+                json!({ "agent": agent, "error": format!("acceptance check: {e}") }),
+            );
+            return (st, None);
+        }
+    };
+    if ok {
+        st.log("check", json!({ "agent": agent, "passed": true }));
+        return (st, None);
+    }
+    let failing = crate::together::failing_tests(&text);
+    let failures = failing.len().max(1);
+    let (blocks, prev) = st
+        .agents
+        .get(agent)
+        .map(|a| (a.stats.check_blocks, a.check_failures))
+        .unwrap_or((0, None));
+    let progressing = prev.is_none_or(|p| failures < p);
+    if blocks >= MAX_CHECK_BLOCKS || !progressing {
+        st.log(
+            "check",
+            json!({ "agent": agent, "passed": false, "failures": failures, "decision": "allow", "reason": if progressing { "check_limit" } else { "no_progress" } }),
+        );
+        return (st, None);
+    }
+    if let Some(a) = st.agents.get_mut(agent) {
+        a.stats.check_blocks += 1;
+        a.check_failures = Some(failures);
+    }
+    st.log(
+        "check",
+        json!({ "agent": agent, "passed": false, "failures": failures, "decision": "block" }),
+    );
+    let mut reason = format!("[concord] Your ticket's acceptance check (`{cmd}`) still fails ({failures} failing):\n");
+    for t in failing.iter().take(25) {
+        reason.push_str(&format!("  {t}\n"));
+    }
+    if failing.len() > 25 {
+        reason.push_str(&format!("  ... and {} more\n", failing.len() - 25));
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    reason.push_str(&format!(
+        "Output (tail):\n{}\nFix your implementation so that these pass, run the check again, then finish. \
+         If a failure depends on a feature that belongs to another ticket, leave it and finish.",
+        lines[lines.len().saturating_sub(15)..].join("\n")
+    ));
+    (st, Some(reason))
+}
+
 fn finish(st: &mut State, agent: &str) {
     if let Some(a) = st.agents.get_mut(agent) {
         a.status = Status::Finished;
@@ -583,6 +674,10 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 "stop",
                 json!({ "agent": agent, "would_block": !remaining.is_empty(), "stale": remaining.keys().collect::<Vec<_>>() }),
             );
+            let (mut st, block) = check_gate(shared, st, agent);
+            if let Some(reason) = block {
+                return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+            }
             finish(&mut st, agent);
             return (String::new(), 0);
         }
@@ -671,6 +766,11 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 if let Some(a) = st.agents.get_mut(agent) {
                     a.stats.gate_blocks += 1;
                 }
+                return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+            }
+            let (guard, block) = check_gate(shared, st, agent);
+            st = guard;
+            if let Some(reason) = block {
                 return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
             }
             if let Some(cmd) = st.together.clone() {
