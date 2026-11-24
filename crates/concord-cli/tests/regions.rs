@@ -50,7 +50,7 @@ fn stop(shared: &Shared, agent: &str) -> Option<String> {
 }
 
 #[test]
-fn colliding_appends_are_combined_by_a_union_hand_off() {
+fn colliding_appends_need_no_coordination_and_are_combined_at_integration() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -93,16 +93,25 @@ fn colliding_appends_are_combined_by_a_union_hand_off() {
     );
     assert!(!out.contains("region conflict"), "{out}");
 
-    // The yielder may not finish before the owner: it must receive its version.
-    let reason = stop(&shared, "yielder").expect("blocked");
-    assert!(reason.contains("both added code at the same place"), "{reason}");
-
-    // The owner (lower rank) is never held back by the yielder.
+    // Neither waits for the other: both may finish at once.
+    assert_eq!(stop(&shared, "yielder"), None);
     assert_eq!(stop(&shared, "owner"), None);
 
-    // Concord hands the owner's work over and keeps both additions...
-    let reason = stop(&shared, "yielder").expect("hand-off");
-    assert!(reason.contains("merged their finished work"), "{reason}");
+    // Git alone would conflict; the collision is classified as insertions
+    // only, and the union merge used at integration keeps both functions,
+    // the owner's first.
+    git(yielder_wt, &["add", "-A"]);
+    git(yielder_wt, &["commit", "-q", "-m", "yielder", "--allow-empty"]);
+    git(owner_wt, &["add", "-A"]);
+    git(owner_wt, &["commit", "-q", "-m", "owner", "--allow-empty"]);
+    assert!(!repo.merge_tree("b/owner", "b/yielder").unwrap().clean);
+    let owner_head = repo.rev_parse("b/owner").unwrap();
+    let yielder_head = repo.rev_parse("b/yielder").unwrap();
+    let found = concord_cli::regions::conflicts(&repo, &yielder_head, &owner_head);
+    assert!(!found.is_empty() && found.iter().all(concord_cli::regions::insert_only));
+    let files: Vec<String> = found.into_iter().map(|f| f.file).collect();
+    let m = Repo::merge_into_union(yielder_wt, &owner_head, "integrate", &files).unwrap();
+    assert!(m.clean);
     let merged = fs::read_to_string(yielder_wt.join("m.py")).unwrap();
     assert!(merged.contains("def c():") && merged.contains("def d():"), "{merged}");
     assert!(
@@ -110,15 +119,6 @@ fn colliding_appends_are_combined_by_a_union_hand_off() {
         "owner first: {merged}"
     );
     assert!(!merged.contains("<<<<<<<"));
-    // ...and the yielder may finish.
-    assert_eq!(stop(&shared, "yielder"), None);
-
-    // The two branches integrate without conflict.
-    git(yielder_wt, &["add", "-A"]);
-    git(yielder_wt, &["commit", "-q", "-m", "yielder", "--allow-empty"]);
-    git(owner_wt, &["add", "-A"]);
-    git(owner_wt, &["commit", "-q", "-m", "owner", "--allow-empty"]);
-    assert!(repo.merge_tree("b/owner", "b/yielder").unwrap().clean);
 }
 
 fn read(shared: &Shared, agent: &str, wt: &Path) {
@@ -172,17 +172,19 @@ fn contract_and_region_waits_never_form_a_cycle() {
         &shared,
         "owner",
         &owner_wt,
-        &format!("{BASE2}\n\ndef c():\n    return g(3)\n"),
+        &format!(
+            "{}\n\ndef c():\n    return g(3)\n",
+            BASE2.replace("    return x\n", "    return x * 1\n")
+        ),
     );
     read(&shared, "owner", &owner_wt);
     edit(
         &shared,
         "producer",
         &producer_wt,
-        &format!(
-            "{}\n\ndef d():\n    return 4\n",
-            BASE2.replace("def g(x):", "def g(x, y):")
-        ),
+        &BASE2
+            .replace("def g(x):", "def g(x, y):")
+            .replace("    return x\n", "    return x + y\n"),
     );
 
     // The producer waits for the owner of the region...
@@ -205,7 +207,10 @@ fn contract_and_region_waits_never_form_a_cycle() {
         &shared,
         "owner",
         &owner_wt,
-        &format!("{BASE2}\n\ndef c():\n    return g(3, 0)\n"),
+        &format!(
+            "{}\n\ndef c():\n    return g(3, 0)\n",
+            BASE2.replace("    return x\n", "    return x * 1\n")
+        ),
     );
     let t0 = std::time::Instant::now();
     assert_eq!(stop(&shared, "owner"), None, "{}", fs::read_to_string(&log).unwrap());

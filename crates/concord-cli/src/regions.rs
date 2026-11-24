@@ -194,15 +194,14 @@ pub fn after_edit(st: &mut State, agent: &str) {
         if new.is_empty() {
             continue;
         }
-        // Insert/insert collisions need no action: the yielder receives the
-        // owner's version with both insertions kept (union hand-off).
+        // Insert/insert collisions need no action at all: integration keeps
+        // both insertions (union merge). No yield, no wait, no hand-off.
         let (union, new): (Vec<FileConflict>, Vec<FileConflict>) = new.into_iter().partition(insert_only);
         if !union.is_empty() {
             for f in &union {
                 st.region_alerted
                     .insert((yielder.clone(), owner.clone(), f.file.clone()));
             }
-            st.region_yields.insert((yielder.clone(), owner.clone()));
             st.log(
                 "region_union",
                 json!({ "yielder": yielder, "owner": owner, "files": union.iter().map(|f| &f.file).collect::<Vec<_>>() }),
@@ -307,16 +306,8 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     for (peer, snap) in running {
         let found = conflicts(&st.repo, &me, &snap);
         if !found.is_empty() && found.iter().all(insert_only) {
-            st.region_yields.insert((agent.to_owned(), peer.clone()));
-            let files: Vec<&str> = found.iter().map(|f| f.file.as_str()).collect();
-            let _ = writeln!(
-                text,
-                "[concord] You and agent `{peer}` (still working) both added code at the same place in {}. \
-                 Nothing to do: when `{peer}` finishes, Concord merges their version into your worktree and keeps \
-                 both additions. Do not wait or poll; finish your work and try to finish again.",
-                files.join(", ")
-            );
-            owners.push(peer);
+            // Pure insertions at the same points: integration combines them.
+            continue;
         } else if !found.is_empty() {
             for f in &found {
                 st.region_alerted
@@ -350,7 +341,7 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let mut handed = Vec::new();
     for (peer, head, union) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
-        if (!yielded && union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
+        if !yielded || st.agents[agent].merged_producers.contains(&peer) {
             continue;
         }
         let base = st.agents[agent].base.clone();

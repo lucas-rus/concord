@@ -97,6 +97,10 @@ pub struct AgentResult {
 pub struct Integration {
     pub order: Vec<String>,
     pub conflicts: BTreeMap<String, Vec<String>>,
+    /// Branches integrated with a union merge of insert/insert collisions
+    /// (region coherence), with the files.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unions: BTreeMap<String, Vec<String>>,
     pub tests_passed: bool,
     pub tests_output_tail: String,
 }
@@ -717,7 +721,22 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
     repo.worktree_add(&iwt, &format!("concord/{run_id}/integration"), &base)?;
     for name in &integration.order {
         let head = repo.rev_parse(&format!("concord/{run_id}/{name}"))?;
-        let m = Repo::merge_into(&iwt, &head, &format!("integrate agent {name}"))?;
+        let msg = format!("integrate agent {name}");
+        let mut m = Repo::merge_into(&iwt, &head, &msg)?;
+        if !m.clean && cfg.regions {
+            // Region coherence leaves insert/insert collisions to integration:
+            // keep both sides when every conflicting hunk is a pure insertion
+            // at the same point (Apel: such additions commute).
+            let ihead = repo.rev_parse(&format!("concord/{run_id}/integration"))?;
+            let found = crate::regions::conflicts(&repo, &ihead, &head);
+            if !found.is_empty() && found.iter().all(crate::regions::insert_only) {
+                let files: Vec<String> = found.into_iter().map(|f| f.file).collect();
+                m = Repo::merge_into_union(&iwt, &head, &msg, &files)?;
+                if m.clean {
+                    integration.unions.insert(name.clone(), files);
+                }
+            }
+        }
         if !m.clean {
             integration.conflicts.insert(name.clone(), m.conflicted_files);
         }
