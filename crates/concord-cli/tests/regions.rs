@@ -50,7 +50,7 @@ fn stop(shared: &Shared, agent: &str) -> Option<String> {
 }
 
 #[test]
-fn colliding_appends_need_no_coordination_and_are_combined_at_integration() {
+fn colliding_appends_are_combined_when_the_second_agent_finishes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -93,41 +93,27 @@ fn colliding_appends_need_no_coordination_and_are_combined_at_integration() {
     );
     assert!(!out.contains("region conflict"), "{out}");
 
-    // Neither waits for the other: both may finish at once.
+    // Nobody waits: the yielder may finish at once.
     assert_eq!(stop(&shared, "yielder"), None);
+    // The owner finishes second: Concord combines the finished yielder's
+    // insertion into its worktree (the earlier finisher's first), verified.
+    let reason = stop(&shared, "owner").expect("hand-off");
+    assert!(reason.contains("both additions are kept"), "{reason}");
+    let merged = fs::read_to_string(owner_wt.join("m.py")).unwrap();
+    assert!(merged.contains("def c():") && merged.contains("def d():"), "{merged}");
+    assert!(
+        merged.find("def d():") < merged.find("def c():"),
+        "earlier finisher first: {merged}"
+    );
+    assert!(!merged.contains("<<<<<<<"));
     assert_eq!(stop(&shared, "owner"), None);
 
-    // Git alone would conflict; the collision is classified as insertions
-    // only, and the union merge used at integration keeps both functions,
-    // the owner's first.
+    // The owner's branch contains the yielder's: integration is clean.
     git(yielder_wt, &["add", "-A"]);
     git(yielder_wt, &["commit", "-q", "-m", "yielder", "--allow-empty"]);
     git(owner_wt, &["add", "-A"]);
     git(owner_wt, &["commit", "-q", "-m", "owner", "--allow-empty"]);
-    assert!(!repo.merge_tree("b/owner", "b/yielder").unwrap().clean);
-    let owner_head = repo.rev_parse("b/owner").unwrap();
-    let yielder_head = repo.rev_parse("b/yielder").unwrap();
-    let found = concord_cli::regions::conflicts(&repo, &owner_head, &yielder_head);
-    assert!(!found.is_empty() && found.iter().all(concord_cli::regions::insert_only));
-    let files: Vec<String> = found.into_iter().map(|f| f.file).collect();
-    // Integration merges later branches into earlier ones: ours (the owner)
-    // first.
-    let m = Repo::merge_into_union(
-        owner_wt,
-        &yielder_head,
-        "integrate",
-        &files,
-        &concord_cli::regions::parses,
-    )
-    .unwrap();
-    assert!(m.clean);
-    let merged = fs::read_to_string(owner_wt.join("m.py")).unwrap();
-    assert!(merged.contains("def c():") && merged.contains("def d():"), "{merged}");
-    assert!(
-        merged.find("def c():") < merged.find("def d():"),
-        "owner first: {merged}"
-    );
-    assert!(!merged.contains("<<<<<<<"));
+    assert!(repo.merge_tree("b/yielder", "b/owner").unwrap().clean);
 }
 
 fn read(shared: &Shared, agent: &str, wt: &Path) {

@@ -89,9 +89,59 @@ pub fn insert_only(f: &FileConflict) -> bool {
             .all(|t| f.mine.iter().any(|m| m.old_start == t.old_start))
 }
 
+/// Definitions (functions, classes, Python methods) with their enclosing
+/// class, counted, for Python and TypeScript/JavaScript source.
+fn definitions(text: &str) -> std::collections::BTreeMap<(String, String), usize> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut classes: Vec<(usize, String)> = Vec::new();
+    for line in text.lines() {
+        let body = line.trim_start();
+        if body.is_empty() || body.starts_with('#') || body.starts_with("//") {
+            continue;
+        }
+        let indent = line.len() - body.len();
+        while classes.last().is_some_and(|(i, _)| indent <= *i) {
+            classes.pop();
+        }
+        let rest = ["export default ", "export ", "async "]
+            .iter()
+            .fold(body, |b, p| b.strip_prefix(p).unwrap_or(b));
+        let (kind, rest) = if let Some(r) = rest.strip_prefix("def ") {
+            ("def", r)
+        } else if let Some(r) = rest.strip_prefix("function ") {
+            ("def", r)
+        } else if let Some(r) = rest.strip_prefix("class ") {
+            ("class", r)
+        } else {
+            continue;
+        };
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            continue;
+        }
+        let scope = classes.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>().join(".");
+        *out.entry((scope, name.clone())).or_insert(0) += 1;
+        if kind == "class" {
+            classes.push((indent, name));
+        }
+    }
+    out
+}
+
+/// Verification of a union of insertions: the merged file parses, and it
+/// does not define anything twice that neither side defined twice (two
+/// agents implementing the same method at different places).
+pub fn verify_union(path: &str, merged: &str, ours: &str, theirs: &str) -> bool {
+    if !parses(path, merged) {
+        return false;
+    }
+    let (m, o, t) = (definitions(merged), definitions(ours), definitions(theirs));
+    m.iter()
+        .all(|(k, n)| *n <= 1 || *n <= o.get(k).copied().unwrap_or(0).max(t.get(k).copied().unwrap_or(0)))
+}
+
 /// Whether a file's content still parses (Python, TypeScript/JavaScript);
-/// languages Concord does not parse are accepted. Used to verify a union of
-/// insertions before it is committed.
+/// languages Concord does not parse are accepted.
 pub fn parses(path: &str, content: &str) -> bool {
     match concord_lang::index_file(path, content) {
         None => true,
@@ -350,9 +400,10 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     // the merges are clean. Bring all their versions in at once so the agent
     // can build on them.
     let mut handed = Vec::new();
+    let mut combined = false;
     for (peer, head, union) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
-        if !yielded || st.agents[agent].merged_producers.contains(&peer) {
+        if (!yielded && union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
             continue;
         }
         let base = st.agents[agent].base.clone();
@@ -365,7 +416,11 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
             if union.is_empty() {
                 Repo::merge_into(&wt, &head, &msg)
             } else {
-                Repo::merge_into_union(&wt, &head, &msg, &union, &parses)
+                // Insertions at the same points as a finished peer: combine
+                // them now, in this agent's worktree, the finished peer's
+                // first (the order integration uses), so the agent tests the
+                // combined code and its branch then contains the peer's.
+                Repo::merge_into_union(&wt, &head, &msg, &union, true, &verify_union)
             }
         });
         match merged {
@@ -376,7 +431,8 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
                     a.merged_producers.insert(peer.clone());
                     a.stats.merges.push(peer.clone());
                 }
-                st.log("region_handoff", json!({ "agent": agent, "owner": peer }));
+                st.log("region_handoff", json!({ "agent": agent, "owner": peer, "combined": !union.is_empty() }));
+                combined |= !union.is_empty();
                 handed.push(format!("`{peer}`"));
             }
             Ok(m) => st.log(
@@ -388,10 +444,15 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     }
     if !handed.is_empty() {
         let _ = st.refresh(agent);
+        let how = if combined {
+            "Where you and they added code at the same places, both additions are kept (theirs first)."
+        } else {
+            "The merges were clean: you had left their lines alone."
+        };
         return Gate::Handoff(format!(
-            "[concord] {} finished, and Concord merged their finished work into your worktree (clean merges: \
-             you had left their lines alone). If your feature needs to change the lines they own, do it now, on top \
-             of their version; otherwise nothing is left to do. Run the tests and finish.",
+            "[concord] {} finished, and Concord merged their finished work into your worktree. {how} If your \
+             feature needs to change the lines they own, do it now, on top of their version. Run the tests and \
+             finish.",
             handed.join(", ")
         ));
     }
@@ -399,5 +460,21 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
         Gate::Clear
     } else {
         Gate::Wait(owners, text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_definitions_are_counted_per_class() {
+        let text = "class A:\n    def f(self):\n        pass\n\nclass B:\n    def f(self):\n        pass\n";
+        let d = definitions(text);
+        assert_eq!(d[&("A".to_owned(), "f".to_owned())], 1);
+        assert_eq!(d[&("B".to_owned(), "f".to_owned())], 1);
+        let twice = format!("{text}    def f(self):\n        return 2\n");
+        assert!(!verify_union("m.py", &twice, text, text));
+        assert!(verify_union("m.py", text, text, text));
     }
 }

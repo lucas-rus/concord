@@ -845,16 +845,14 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         let mut m = Repo::merge_into(&iwt, &head, &msg)?;
         if !m.clean && cfg.regions {
             // Region coherence leaves insert/insert collisions to integration:
-            // keep both sides when every conflicting hunk is a pure insertion
-            // at the same point (Apel: such additions commute).
-            let ihead = repo.rev_parse(&format!("concord/{run_id}/integration"))?;
-            let found = crate::regions::conflicts(&repo, &ihead, &head);
-            if !found.is_empty() && found.iter().all(crate::regions::insert_only) {
-                let files: Vec<String> = found.into_iter().map(|f| f.file).collect();
-                m = Repo::merge_into_union(&iwt, &head, &msg, &files, &crate::regions::parses)?;
-                if m.clean {
-                    integration.unions.insert(name.clone(), files);
-                }
+            // conflicts whose blocks are all pure insertions on both sides are
+            // combined (both kept whole, earlier agents first) and verified;
+            // any other conflict stays a conflict.
+            let files = m.conflicted_files.clone();
+            let u = Repo::merge_into_union(&iwt, &head, &msg, &files, false, &crate::regions::verify_union)?;
+            if u.clean {
+                integration.unions.insert(name.clone(), files);
+                m = u;
             }
         }
         if !m.clean {

@@ -104,106 +104,90 @@ pub fn parse_hunks(diff: &str) -> Vec<Hunk> {
     hunks
 }
 
-/// Line hunks that turn `base` into `side` (`git diff --no-index -U0`).
-pub fn text_hunks(base: &str, side: &str) -> Result<Vec<Hunk>> {
+/// Resolve the conflict blocks of a file merged with diff3 markers when every
+/// block is a pure insertion on both sides (an empty base section): both
+/// blocks are kept whole, ours first (theirs first with `theirs_first`), and
+/// identical blocks once. Returns None if any block changes base lines.
+pub fn resolve_insertion_conflicts(text: &str, theirs_first: bool) -> Option<String> {
+    #[derive(PartialEq)]
+    enum At {
+        Out,
+        Ours,
+        Base,
+        Theirs,
+    }
+    let mut out = String::new();
+    let (mut ours, mut base, mut theirs) = (String::new(), String::new(), String::new());
+    let mut at = At::Out;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        match at {
+            At::Out if bare.starts_with("<<<<<<< ") || bare == "<<<<<<<" => at = At::Ours,
+            At::Out => out.push_str(line),
+            At::Ours if bare.starts_with("||||||| ") || bare == "|||||||" => at = At::Base,
+            At::Ours if bare == "=======" => return None, // no base section: not diff3
+            At::Ours => ours.push_str(line),
+            At::Base if bare == "=======" => at = At::Theirs,
+            At::Base => base.push_str(line),
+            At::Theirs if bare.starts_with(">>>>>>> ") || bare == ">>>>>>>" => {
+                if !base.trim().is_empty() {
+                    return None;
+                }
+                let (first, second) = if theirs_first {
+                    (&theirs, &ours)
+                } else {
+                    (&ours, &theirs)
+                };
+                out.push_str(first);
+                if theirs != ours {
+                    out.push_str(second);
+                }
+                ours.clear();
+                base.clear();
+                theirs.clear();
+                at = At::Out;
+            }
+            At::Theirs => theirs.push_str(line),
+        }
+    }
+    (at == At::Out).then_some(out)
+}
+
+/// Union of insertions of three versions of a file: `git merge-file` with
+/// patience alignment (only unique lines anchor the merge, so equal lines
+/// inside two insertions are not interleaved) and diff3 markers, then
+/// [`resolve_insertion_conflicts`]. `Ok(None)`: not a union of insertions.
+pub fn union_text(base: &str, ours: &str, theirs: &str) -> Result<Option<String>> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "concord-hunks-{}-{}",
+        "concord-union-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir)?;
-    let (a, b) = (dir.join("a"), dir.join("b"));
-    std::fs::write(&a, base)?;
-    std::fs::write(&b, side)?;
+    let (b, o, t) = (dir.join("base"), dir.join("ours"), dir.join("theirs"));
+    std::fs::write(&b, base)?;
+    std::fs::write(&o, ours)?;
+    std::fs::write(&t, theirs)?;
     let out = Command::new("git")
-        .current_dir(&dir)
-        .args(["diff", "--no-index", "--no-color", "-U0", "--"])
-        .arg(&a)
+        .args(["merge-file", "-p", "--diff3", "--diff-algorithm=patience"])
+        .arg(&o)
         .arg(&b)
+        .arg(&t)
         .output();
     let _ = std::fs::remove_dir_all(&dir);
     let out = out?;
-    // Exit status 1 means "files differ".
-    if !(out.status.success() || out.status.code() == Some(1)) {
+    // Exit status: number of conflicts (>= 0); negative on error.
+    if out.status.code().is_none_or(|c| c < 0) {
         return Err(GitError::Command {
-            args: "diff --no-index".into(),
+            args: "merge-file".into(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
-    Ok(parse_hunks(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// Three-way merge of line hunks in which the only allowed overlap is two
-/// insertions at the same point: each insertion is kept whole, `ours` first.
-/// Any other overlap, or adjacency (which git also treats as a conflict),
-/// returns None. Unlike `git merge-file --union`, lines that happen to be
-/// equal inside the two insertions are never interleaved.
-pub fn union_insertions(base: &str, ours: &[Hunk], theirs: &[Hunk]) -> Option<String> {
-    struct Op<'a> {
-        start: usize,
-        end: usize,
-        lines: &'a [String],
-        side: u8,
-    }
-    fn op(h: &Hunk, side: u8) -> Op<'_> {
-        let (start, end) = if h.old_count == 0 {
-            (h.old_start as usize, h.old_start as usize)
-        } else {
-            let s = h.old_start as usize - 1;
-            (s, s + h.old_count as usize)
-        };
-        Op {
-            start,
-            end,
-            lines: &h.new_lines,
-            side,
-        }
-    }
-    fn build<'a>(base: &str, mut ops: Vec<Op<'a>>) -> Option<String> {
-        let base_lines: Vec<&str> = base.lines().collect();
-        ops.sort_by_key(|o| (o.start, o.end != o.start, o.side));
-        let mut out: Vec<&str> = Vec::new();
-        let mut pos = 0usize;
-        let mut i = 0;
-        while i < ops.len() {
-            let o = &ops[i];
-            if o.start < pos || o.start > base_lines.len() {
-                return None;
-            }
-            out.extend(&base_lines[pos..o.start]);
-            if o.start == o.end {
-                // Insertions at this point, ours first; then nothing else of
-                // the other side may start here.
-                let mut j = i;
-                while j < ops.len() && ops[j].start == o.start && ops[j].start == ops[j].end {
-                    out.extend(ops[j].lines.iter().map(String::as_str));
-                    j += 1;
-                }
-                if j < ops.len() && ops[j].start == o.start && ops[i..j].iter().any(|x| x.side != ops[j].side) {
-                    return None;
-                }
-                pos = o.start;
-                i = j;
-            } else {
-                if ops[i + 1..].iter().any(|x| x.side != o.side && x.start <= o.end) {
-                    return None;
-                }
-                out.extend(o.lines.iter().map(String::as_str));
-                pos = o.end;
-                i += 1;
-            }
-        }
-        out.extend(&base_lines[pos.min(base_lines.len())..]);
-        let mut text = out.join("\n");
-        if !out.is_empty() {
-            text.push('\n');
-        }
-        Some(text)
-    }
-    let mut ops: Vec<Op> = ours.iter().map(|h| op(h, 0)).collect();
-    ops.extend(theirs.iter().map(|h| op(h, 1)));
-    build(base, ops)
+    Ok(resolve_insertion_conflicts(
+        &String::from_utf8_lossy(&out.stdout),
+        false,
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -423,20 +407,31 @@ impl Repo {
 
     /// Merge `rev` into the worktree, leaving conflict markers in place for the
     /// agent to resolve (no abort). Returns the conflicted files.
-    /// Merge `rev` into the worktree's branch like `merge_into`, but resolve the
-    /// conflicts in `union_files` by keeping both sides' insertions whole, the
-    /// worktree's (ours) first ([`union_insertions`]). Each resolved file must
-    /// pass `verify(path, content)` (e.g. it still parses). Any other conflict,
-    /// or a failed check, aborts the merge.
+    /// Merge `rev` into the worktree's branch like `merge_into` (patience
+    /// alignment, diff3 markers), but resolve the conflicts in `union_files`
+    /// whose blocks are pure insertions on both sides, keeping both whole, the
+    /// worktree's (ours) first ([`resolve_insertion_conflicts`]). Each resolved
+    /// file must pass `verify(path, merged, ours, theirs)`. Any other
+    /// conflict, or a failed check, aborts the merge.
     pub fn merge_into_union(
         worktree: &Path,
         rev: &str,
         message: &str,
         union_files: &[String],
-        verify: &dyn Fn(&str, &str) -> bool,
+        theirs_first: bool,
+        verify: &dyn Fn(&str, &str, &str, &str) -> bool,
     ) -> Result<MergeIntoOutcome> {
         let mut args: Vec<&str> = IDENTITY.to_vec();
-        args.extend(["merge", "--no-ff", "--no-commit", rev]);
+        args.extend([
+            "-c",
+            "merge.conflictStyle=diff3",
+            "merge",
+            "--no-ff",
+            "--no-commit",
+            "-X",
+            "diff-algorithm=patience",
+            rev,
+        ]);
         let merged = run(worktree, &args, None);
         if let Err(e) = &merged
             && !matches!(e, GitError::Command { .. })
@@ -464,9 +459,10 @@ impl Repo {
         let result = (|| -> Result<()> {
             for f in &files {
                 let stage = |n: u8| run(worktree, &["show", &format!(":{n}:{f}")], None).unwrap_or_default();
-                let (base, ours, theirs) = (stage(1), stage(2), stage(3));
-                let merged = union_insertions(&base, &text_hunks(&base, &ours)?, &text_hunks(&base, &theirs)?)
-                    .filter(|m| verify(f, m))
+                let (ours, theirs) = (stage(2), stage(3));
+                let text = std::fs::read_to_string(worktree.join(f))?;
+                let merged = resolve_insertion_conflicts(&text, theirs_first)
+                    .filter(|m| verify(f, m, &ours, &theirs))
                     .ok_or_else(|| GitError::Parse(format!("{f}: not a clean union of insertions")))?;
                 std::fs::write(worktree.join(f), merged)?;
                 run(worktree, &["add", "--", f], None)?;
@@ -697,18 +693,13 @@ mod tests {
 
     #[test]
     fn union_keeps_each_insertion_whole() {
-        // Two classes inserted at the same point, with identical lines inside
-        // them: git merge-file --union interleaves those, which broke the
-        // syntax in a real run. Each insertion must stay one block.
+        // Two classes inserted at the same point with equal lines inside
+        // them (blank lines, decorators, signatures): they must not be
+        // interleaved, which once broke the syntax of a real run.
         let base = "class A:\n    pass\n";
         let ours = format!("{base}\n\nclass B(T):\n    @staticmethod\n    def f(x):\n        return 1\n");
         let theirs = format!("{base}\n\nclass C(T):\n    @staticmethod\n    def f(x):\n        return 2\n");
-        let merged = union_insertions(
-            base,
-            &text_hunks(base, &ours).unwrap(),
-            &text_hunks(base, &theirs).unwrap(),
-        )
-        .unwrap();
+        let merged = union_text(base, &ours, &theirs).unwrap().unwrap();
         let b = merged.find("class B").unwrap();
         let c = merged.find("class C").unwrap();
         assert!(b < c, "{merged}");
@@ -717,27 +708,28 @@ mod tests {
             "{merged}"
         );
         assert!(merged[c..].contains("return 2"), "{merged}");
-        // A modification next to the other side's insertion is not a union.
+        // A change to base lines is not a union.
         let modified = base.replace("pass", "x = 1");
+        let theirs2 = base.replace("pass", "y = 2");
+        assert_eq!(union_text(base, &modified, &theirs2).unwrap(), None);
+    }
+
+    #[test]
+    fn union_order_is_chosen_by_the_caller() {
+        let text = "<<<<<<< o\nO\n||||||| b\n=======\nT\n>>>>>>> t\n";
+        assert_eq!(resolve_insertion_conflicts(text, false).unwrap(), "O\nT\n");
+        assert_eq!(resolve_insertion_conflicts(text, true).unwrap(), "T\nO\n");
+    }
+
+    #[test]
+    fn union_counts_identical_insertions_once() {
+        let base = "a\nz\n";
+        let ours = "a\nS1\nS2\nz\n";
+        let theirs = "a\nS1\nS2\nz\nT\n";
+        assert_eq!(union_text(base, ours, theirs).unwrap().unwrap(), "a\nS1\nS2\nz\nT\n");
         assert_eq!(
-            union_insertions(
-                base,
-                &text_hunks(base, &modified).unwrap(),
-                &text_hunks(base, &theirs).unwrap()
-            ),
-            None
-        );
-        // Disjoint changes are applied as they are.
-        let top = format!("import os\n{base}");
-        let both = union_insertions(
-            base,
-            &text_hunks(base, &top).unwrap(),
-            &text_hunks(base, &theirs).unwrap(),
-        )
-        .unwrap();
-        assert!(
-            both.starts_with("import os\nclass A:") && both.contains("class C"),
-            "{both}"
+            resolve_insertion_conflicts("x\n<<<<<<< o\nA\n||||||| b\n=======\nA\n>>>>>>> t\ny\n", false).unwrap(),
+            "x\nA\ny\n"
         );
     }
 
