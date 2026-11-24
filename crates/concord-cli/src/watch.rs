@@ -16,6 +16,9 @@ use std::time::Duration;
 /// Feed lines kept on screen.
 const FEED: usize = 14;
 
+/// Without events for this long (and without a report), a run looks stopped.
+const STALE_SECS: u64 = 600;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum AgentState {
     #[default]
@@ -47,6 +50,8 @@ pub struct WatchState {
     pub feed: VecDeque<(f64, String)>,
     pub elapsed: f64,
     pub done: bool,
+    /// Seconds since the event log last changed (wall clock), if known.
+    pub idle: Option<u64>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -207,7 +212,13 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
     };
     let finished = st.agents.values().filter(|a| a.state == AgentState::Finished).count();
     let mut out = String::new();
-    let status = if st.done { "complete" } else { "running" };
+    let status = match (st.done, st.idle) {
+        (true, _) => "complete".to_owned(),
+        // Agents can think for minutes, but a quarter hour without a single
+        // event and without a report usually means the run has died.
+        (false, Some(idle)) if idle > STALE_SECS => format!("no events for {} min: stopped?", idle / 60),
+        _ => "running".to_owned(),
+    };
     let _ = writeln!(
         out,
         "{}  {}  {}/{} finished  {}",
@@ -312,6 +323,11 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
             st.apply(line.trim_end());
         }
         st.done = run.join("report.json").exists();
+        st.idle = std::fs::metadata(run.join("events.jsonl"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|d| d.as_secs());
         let screen = render(&st, &title, color);
         let mut out = std::io::stdout().lock();
         if once {
@@ -373,6 +389,15 @@ mod tests {
         let st = fold(&[r#"{"t":1.0,"event":"wait","data":{"agent":"c","for":["a","b"]}}"#]);
         let screen = render(&st, "run", false);
         assert!(screen.contains("waiting for a, b (contract)"), "{screen}");
+    }
+
+    #[test]
+    fn a_run_without_events_for_long_looks_stopped() {
+        let mut st = fold(&[r#"{"t":1.0,"event":"footprint","data":{"agent":"a"}}"#]);
+        st.idle = Some(1200);
+        assert!(render(&st, "run", false).contains("no events for 20 min: stopped?"));
+        st.idle = Some(30);
+        assert!(render(&st, "run", false).contains("running"));
     }
 
     #[test]
