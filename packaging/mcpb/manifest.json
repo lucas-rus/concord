@@ -32,6 +32,7 @@
     { "name": "concord_smart_merge", "description": "Merge branches in producer-first contract order with verified insertion union and bisection" },
     { "name": "concord_negotiate", "description": "Propose a contract change to the live agent holding a symbol lease" },
     { "name": "concord_ack", "description": "Explicitly acknowledge a peer's published contract update" },
+    { "name": "concord_plan", "description": "Partition the repository symbol graph into conflict-aware parallel ticket clusters" },
     { "name": "concord_run", "description": "Start a team of parallel coding agents coordinated live by Concord" },
     { "name": "concord_status", "description": "Progress of a Concord run, or the list of runs" },
     { "name": "concord_result", "description": "Final report, SASE Merge-Readiness Pack, and integration branch of a finished run" },

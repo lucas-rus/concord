@@ -9,6 +9,7 @@
 pub mod go_lang;
 pub mod python;
 pub mod rust_lang;
+pub mod schema;
 pub mod typescript;
 
 use concord_core::{CallArgs, Symbol, SymbolId, SymbolKind, UseSite};
@@ -66,6 +67,7 @@ pub fn is_supported_path(path: &str) -> bool {
         || typescript::is_typescript_path(path)
         || rust_lang::is_rust_path(path)
         || go_lang::is_go_path(path)
+        || schema::is_schema_path(path)
 }
 
 /// True if `path` follows standard test-file naming conventions across
@@ -100,6 +102,8 @@ pub fn index_file(path: &str, source: &str) -> Option<Result<FileIndex, LangErro
         Some(rust_lang::index_file(path, source))
     } else if go_lang::is_go_path(path) {
         Some(go_lang::index_file(path, source))
+    } else if schema::is_schema_path(path) {
+        Some(schema::index_file(path, source))
     } else {
         None
     }

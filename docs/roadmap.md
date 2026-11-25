@@ -42,10 +42,10 @@ Aligned with the BSc thesis work plan and open-source product roadmap.
 
 ## M4: Post-Thesis & Open-Source v1.0 Roadmap (Future Use Cases)
 
-- [ ] **Compiler / LSP / SCIP Precision Layer (Opt-in Tier 2)**: Optional `ty` / `basedpyright` (Python), `typescript-language-server` (TS), `rust-analyzer` (Rust), and `gopls` (Go) enrichment for polymorphic receiver types and inferred return types while keeping sub-50ms Tree-sitter Tier 1 default
-- [ ] **GitHub App & CI Cross-PR Action (`concord-action`)**: Run `concord analyze` + `concord merge --dry-run` automatically across all concurrently open PRs in a repository (human + Devin/Codex/Dependabot/Claude PRs), posting a live SASE Merge-Readiness Pack comment before any PR merges
-- [ ] **Schema & Pseudo-Symbol Contracts**: Extend `concord-lang` to OpenAPI/Swagger specs, GraphQL schemas, Prisma/SQL migrations, Protobufs, and HTTP route tables so backend and frontend agents coordinate API contracts automatically
-- [ ] **Conflict-Aware Task Partitioner (`concord plan`)**: Pre-execution task splitter (inspired by Co-Coder) using `RepoIndex` symbol-coupling centrality to group tightly coupled symbols into the same ticket and maximize parallel speedup
+- [x] **Compiler / Type-Checker Precision Layer (`concord typecheck`)**: Auto-detect and run `tsc --noEmit`, `ty`/`basedpyright`/`pyright`, `cargo check`, or `go vet` for inferred/duck-typed/polymorphic checks alongside sub-50ms Tree-sitter Tier 1 (optional LSP/SCIP sidecar remains future work)
+- [x] **GitHub Cross-PR Action (`action.yml`)**: Reusable composite GitHub Action running `concord analyze` across all concurrently open PRs targeting `main`
+- [x] **Schema & Pseudo-Symbol Contracts (`concord-lang::schema`)**: SQL DDL (`.sql`), Prisma (`.prisma`), Protocol Buffers (`.proto`), and OpenAPI/Swagger specs (`.json`/`.yaml`/`.yml`) indexed into the shared symbol graph (`db.*`, `prisma.*`, `proto.*`, `api.*`)
+- [x] **Conflict-Aware Task Partitioner (`concord plan` + `concord_plan` MCP tool)**: Dependency-graph partitioner identifying shared contract hubs and recommending producer-first parallel ticket clusters
 - [ ] **Distributed Cloud / Container Daemon**: Authenticated Unix-socket / mTLS HTTP transport + SQLite WAL event persistence so remote containerized agents (SWE-bench / OpenHands sandboxes / Kubernetes runners) share one live coherence directory
 - [ ] **Interactive IDE / Agentic Cockpit Extension**: VS Code / Cursor / Zed panel + `ratatui` TUI visualizing live symbol leases, contract diffs, and one-click MRP approval
 - [ ] **Formal Protocol Verification**: TLA+ / Stateright model checking of the combined Contract + Region + Waits-For rank-acyclic state machine

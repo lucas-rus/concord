@@ -129,6 +129,17 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "concord_plan",
+            "description": "Analyse the repository symbol dependency graph to identify shared contract hubs and recommend conflict-aware parallel ticket clusters in producer-first order before calling concord_run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "rev": { "type": "string", "description": "Git revision (default: HEAD)." },
+                    "max_clusters": { "type": "integer", "description": "Maximum number of clusters (default: 6)." }
+                }
+            }
+        },
+        {
             "name": "concord_run",
             "description": "Start a team of AI coding agents working IN PARALLEL in isolated git worktrees coordinated live by Concord. Default coordination ('regions') combines contract coherence + region coherence + verified insertion union so agents never fight over git conflict markers. Returns immediately with `run_id`; monitor with `concord_status` and retrieve integrated branch + Merge-Readiness Pack with `concord_result`.",
             "inputSchema": {
@@ -245,6 +256,7 @@ pub fn dispatch(cfg: &McpConfig, cwd: &Path, name: &str, args: &Value) -> Result
         "concord_smart_merge" => tool_smart_merge(&root, args),
         "concord_negotiate" => tool_ipc(&root, "Negotiate", args),
         "concord_ack" => tool_ipc(&root, "Ack", args),
+        "concord_plan" => tool_plan(&repo, args),
         "concord_run" => start_run(cfg, &repo, &root, args),
         "concord_status" => match args.get("run_id").and_then(Value::as_str) {
             Some(id) => status(&root, id),
@@ -439,6 +451,13 @@ fn tool_worktrees(repo: &Repo, args: &Value) -> Result<String> {
     let include_clean = args.get("include_clean").and_then(Value::as_bool).unwrap_or(false);
     let wt = analyze_worktrees(repo, base, include_clean)?;
     Ok(render_worktrees(&wt))
+}
+
+fn tool_plan(repo: &Repo, args: &Value) -> Result<String> {
+    let rev = args.get("rev").and_then(Value::as_str).unwrap_or("HEAD");
+    let max_clusters = args.get("max_clusters").and_then(Value::as_u64).unwrap_or(6) as usize;
+    let plan = crate::plan::build_plan(repo, rev, max_clusters)?;
+    Ok(crate::plan::render_plan(&plan))
 }
 
 fn tool_smart_merge(root: &Path, args: &Value) -> Result<String> {

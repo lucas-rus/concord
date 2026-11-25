@@ -3,11 +3,13 @@
 pub mod live;
 pub mod mcp;
 pub mod mrp;
+pub mod plan;
 pub mod probe;
 pub mod regions;
 pub mod report;
 pub mod run;
 pub mod together;
+pub mod typecheck;
 pub mod watch;
 
 use anyhow::{Context, Result};

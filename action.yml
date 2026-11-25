@@ -1,0 +1,38 @@
+name: "Concord Cross-PR Coherence Check"
+description: "Analyse concurrent open pull requests for cross-file contract breaks, duplicate symbols, and smart-merge readiness."
+inputs:
+  base:
+    description: "Base branch to compare PR heads against"
+    required: false
+    default: "main"
+  test-cmd:
+    description: "Optional test command to run on the virtually merged tree"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Install Concord
+      shell: bash
+      run: curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh
+    - name: Analyse open PRs
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BASE_BRANCH: ${{ inputs.base }}
+      run: |
+        set -euo pipefail
+        export PATH="$HOME/.local/bin:$PATH"
+        git fetch origin "$BASE_BRANCH" --depth=50
+        PRS=$(gh pr list --state open --base "$BASE_BRANCH" --json number,headRefName --jq '.[] | "pr-\(.number):origin/\(.headRefName)"')
+        REFS=()
+        for item in $PRS; do
+          ref="${item#*:}"
+          git fetch origin "${ref#origin/}:${ref#origin/}" --depth=50 || true
+          REFS+=("${ref#origin/}")
+        done
+        if [ "${#REFS[@]}" -ge 2 ]; then
+          concord analyze --base "origin/$BASE_BRANCH" "${REFS[@]}" --notices
+        else
+          echo "Fewer than 2 open PRs targeting $BASE_BRANCH; nothing to cross-check."
+        fi

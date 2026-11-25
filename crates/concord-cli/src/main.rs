@@ -109,6 +109,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Partition a repository into conflict-aware parallel ticket clusters and shared hubs.
+    Plan {
+        /// Git revision to analyse (default: HEAD).
+        #[arg(long, default_value = "HEAD")]
+        rev: String,
+        /// Maximum parallel clusters to suggest.
+        #[arg(long, default_value_t = 6)]
+        max_clusters: usize,
+        /// Repository path.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Auto-detect and run the repository's Tier-2 native type checker (tsc, pyright/ty, cargo check, go vet).
+    Typecheck {
+        /// Directory to check.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Launch several AI coding agents in parallel worktrees, coordinate them
     /// live, integrate their work and run the tests.
     Run {
@@ -449,6 +471,43 @@ fn main() -> Result<()> {
                 concord_exe: std::env::current_exe()?,
             })?;
         }
+        Command::Plan {
+            rev,
+            max_clusters,
+            repo,
+            json,
+        } => {
+            let repo = Repo::open(&repo)?;
+            let plan = concord_cli::plan::build_plan(&repo, &rev, max_clusters)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                print!("{}", concord_cli::plan::render_plan(&plan));
+            }
+        }
+        Command::Typecheck { repo, json } => match concord_cli::typecheck::run_type_check(&repo) {
+            Some(res) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&res)?);
+                } else if !res.available {
+                    println!("{} not found on PATH; skipping Tier-2 type check.", res.tool);
+                } else if res.ok {
+                    println!("{} passed (0 errors).", res.tool);
+                } else {
+                    for d in &res.diagnostics {
+                        println!("{d}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+            None => {
+                if json {
+                    println!("null");
+                } else {
+                    println!("No native type checker detected.");
+                }
+            }
+        },
         Command::Watch { dir, once, interval_ms } => {
             concord_cli::watch::watch(&dir, once, Duration::from_millis(interval_ms))?;
         }
