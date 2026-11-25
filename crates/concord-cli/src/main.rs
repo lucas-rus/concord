@@ -474,6 +474,7 @@ fn main() -> Result<()> {
                 (None, None) => bail!("pass --tasks <file.json> or --milestones <file.json>"),
             };
             let mut cur_base = base;
+            let n_waves = waves.len();
             for (idx, wave) in waves.into_iter().enumerate() {
                 let wave_out = if wave.name.is_empty() {
                     base_out.clone()
@@ -515,7 +516,10 @@ fn main() -> Result<()> {
                 let r = run::run(&cfg)?;
                 print!("{}", run::render(&r));
                 eprintln!("run directory: {}", r.run_dir.display());
-                if !r.integration.conflicts.is_empty() {
+                // Conflicts end a multi-wave run (the next wave would build on
+                // a broken integration), but the last (or only) wave's
+                // conflicts are a result, reported, not a failure of the run.
+                if !r.integration.conflicts.is_empty() && idx + 1 < n_waves {
                     bail!(
                         "wave {} ended with {} merge conflict(s); stopping before next wave",
                         idx + 1,
