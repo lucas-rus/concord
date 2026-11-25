@@ -9,6 +9,43 @@ Concord is an orchestration engine for running several AI coding agents (Claude 
 
 > **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, and Go** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), live `git worktree` inspector (`concord worktrees`), contract-verified smart merge (`concord merge`), SASE Merge-Readiness Packs (`concord mrp`), and an 11-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md).
 
+## Results with real agents
+
+**Twelve agents building a full CommonMark 0.31.2 parser in parallel ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
+
+| Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
+|---|---|---|---|---|
+| `sequential` (1 agent, ticket-by-ticket) | 645 / 652 (98.9%) | 0 | 0 | 157.1 min (1.0×) |
+| `parallel-off` (12 agents, uncoordinated) | 374 / 652 (57.4%) | 268 | 9 / 12 branches | 29.0 min |
+| `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
+| **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
+
+**Cross-language generalization: six agents building a TypeScript 5 (`strict`) dispatch engine (`dispecerat`) with zero per-ticket test hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
+
+| Condition | Held-out spec (of 48) | Cross-ticket synergy | Integration loss | Merge conflicts | Wall-clock time |
+|---|---|---|---|---|---|
+| `sequential` (1 agent, ticket-by-ticket) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 | 13.3 min (1.0×) |
+| `parallel-off` (6 agents, uncoordinated) | 21 / 48 (43.8%) | 0 / 6 | 21 | 3 / 6 | 6.0 min |
+| `parallel-fileleases` (6 agents, file locks) | 14 / 48 (29.2%) | 0 / 6 | 25 | 4 / 6 | 7.7 min |
+| `parallel-integrator` (6 agents + 7th integrator) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 (7th agent) | 11.7 min (1.13×) |
+| **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
+| **`Orchestrator + Concord` (autonomous MCP split)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **8.6 min (team)** |
+
+**A small project built by a team.** Three Haiku agents build [`conta`](examples/conta) (an offline version of a Romanian invoice-processing pipeline) over three milestones, each split into three parallel tickets in which one agent changes an interface the others use. Hidden acceptance tests, validated against a reference solution, check the integrated result. 3 runs per condition ([eval/project](eval/project)):
+
+| | hidden tests passed (of 33) | milestones complete | merge conflicts |
+|---|---|---|---|
+| without Concord | 15.3 (46%) | 0 / 9 | 3 / 9 |
+| contract layer only | 24.0 (73%) | 3 / 9 | 3 / 9 |
+| peer merge only | 22.0 (67%) | 3 / 9 | 0 / 9 |
+| **Concord (both)** | **32.0 (97%)** | **7 / 9** | **0 / 9** |
+
+The two mechanisms fix different failures: the contract layer fixes interface changes (removed or changed functions other agents call), and peer merge fixes overlapping edits.
+
+**CooperBench pairs with agents.** 32 randomly sampled CooperBench feature pairs (jinja, click, dirty-equals, dspy), two Haiku agents each, judged by CooperBench's hidden tests ([eval/coop](eval/coop)): both features pass in **1/32** pairs without Concord and **13/32** with Concord (p = 0.0005, exact McNemar). Most CooperBench failures are overlapping edits, which peer merge resolves.
+
+**Shop scenario.** Three agents on ordinary tickets, one of which makes `currency` a required argument of `price_order` ([eval/live](eval/live/README.md)): integrated tests pass in **0/3** runs without Concord and **3/3** with it (Haiku, ≈ $0.03 per run).
+
 ## The problem
 
 Today's parallel-agent setups give each agent its own git worktree. That stops agents from overwriting each other's files, but not from **breaking each other's code**:
@@ -164,42 +201,6 @@ concord  1795518603-enforce-463d82  1/12 finished  03:07 · running
   02:36  combine   lists + headings add at the same place in src/cmark/blocks.py
   02:59  done      code-spans finished
 ```
-
-## Results with real agents
-
-**Twelve agents building a full CommonMark 0.31.2 parser in parallel ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
-
-| Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
-|---|---|---|---|---|
-| `sequential` (1 agent, ticket-by-ticket) | 645 / 652 (98.9%) | 0 | 0 | 157.1 min (1.0×) |
-| `parallel-off` (12 agents, uncoordinated) | 374 / 652 (57.4%) | 268 | 9 / 12 branches | 29.0 min |
-| `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
-| **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
-
-**Cross-language generalization: six agents building a TypeScript 5 (`strict`) dispatch engine (`dispecerat`) with zero per-ticket test hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
-
-| Condition | Held-out spec (of 48) | Cross-ticket synergy | Integration loss | Merge conflicts | Wall-clock time |
-|---|---|---|---|---|---|
-| `sequential` (1 agent, ticket-by-ticket) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 | 13.3 min (1.0×) |
-| `parallel-off` (6 agents, uncoordinated) | 21 / 48 (43.8%) | 0 / 6 | 21 | 3 / 6 | 6.0 min |
-| `parallel-fileleases` (6 agents, file locks) | 14 / 48 (29.2%) | 0 / 6 | 25 | 4 / 6 | 7.7 min |
-| `parallel-integrator` (6 agents + 7th integrator) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 (7th agent) | 11.7 min (1.13×) |
-| **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
-
-**A small project built by a team.** Three Haiku agents build [`conta`](examples/conta) (an offline version of a Romanian invoice-processing pipeline) over three milestones, each split into three parallel tickets in which one agent changes an interface the others use. Hidden acceptance tests, validated against a reference solution, check the integrated result. 3 runs per condition ([eval/project](eval/project)):
-
-| | hidden tests passed (of 33) | milestones complete | merge conflicts |
-|---|---|---|---|
-| without Concord | 15.3 (46%) | 0 / 9 | 3 / 9 |
-| contract layer only | 24.0 (73%) | 3 / 9 | 3 / 9 |
-| peer merge only | 22.0 (67%) | 3 / 9 | 0 / 9 |
-| **Concord (both)** | **32.0 (97%)** | **7 / 9** | **0 / 9** |
-
-The two mechanisms fix different failures: the contract layer fixes interface changes (removed or changed functions other agents call), and peer merge fixes overlapping edits.
-
-**CooperBench pairs with agents.** 32 randomly sampled CooperBench feature pairs (jinja, click, dirty-equals, dspy), two Haiku agents each, judged by CooperBench's hidden tests ([eval/coop](eval/coop)): both features pass in **1/32** pairs without Concord and **13/32** with Concord (p = 0.0005, exact McNemar). Most CooperBench failures are overlapping edits, which peer merge resolves.
-
-**Shop scenario.** Three agents on ordinary tickets, one of which makes `currency` a required argument of `price_order` ([eval/live](eval/live/README.md)): integrated tests pass in **0/3** runs without Concord and **3/3** with it (Haiku, ≈ $0.03 per run).
 
 ## First results (RQ1, CooperBench gold patches)
 
