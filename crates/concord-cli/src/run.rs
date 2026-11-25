@@ -103,6 +103,9 @@ const OPENCODE_MAX_TURNS: u32 = 10;
 
 /// Resumes of a session after its turn ended on a network error.
 const OPENCODE_TRANSPORT_RETRIES: u32 = 5;
+/// Repair rounds after integration, and resumes per ticket across them.
+const POST_MERGE_ROUNDS: u32 = 3;
+const POST_MERGE_ATTEMPTS: u32 = 2;
 
 const TRANSPORT_CONTINUE: &str = "The connection to the model provider was lost in the middle of your last step. \
 Nothing you did was lost. Continue the task exactly where you left off.";
@@ -1034,142 +1037,163 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
                 }]
             }
         };
-        let (mut cur_failures, initial_failing) = evaluate_task_checks(&check_targets, &iwt);
-        for ft in initial_failing.into_iter().take(4) {
+        // Repair rounds: every ticket whose check still fails on the integrated
+        // tree is resumed at once, in its own worktree brought up to the
+        // integrated head. The repairs are merged back one by one and each is
+        // kept only if the total number of failures shrinks. The checks are
+        // re-evaluated every round, so a ticket left failing by an earlier
+        // repair is never skipped.
+        let (mut cur_failures, mut failing) = evaluate_task_checks(&check_targets, &iwt);
+        let mut attempts: BTreeMap<String, u32> = BTreeMap::new();
+        for round in 1..=POST_MERGE_ROUNDS {
             if cur_failures == 0 {
                 break;
-            }
-            let task_name = ft.name;
-            let check_cmd = ft.cmd;
-            // Re-check this specific ticket in case an earlier reconciliation already fixed it.
-            let (_, single) = evaluate_task_checks(
-                &[Task {
-                    name: task_name.clone(),
-                    prompt: String::new(),
-                    check: Some(check_cmd.clone()),
-                }],
-                &iwt,
-            );
-            let Some(cur_ft) = single.into_iter().next() else {
-                continue;
-            };
-            let (failing_ids, out_text) = (cur_ft.ids, cur_ft.output);
-            let sid = results
-                .get(&task_name)
-                .map(|r| r.session_id.clone())
-                .unwrap_or_default();
-            if sid.is_empty() {
-                continue;
             }
             let Ok(iwt_repo) = Repo::open(&iwt) else { break };
             let Ok(prev_iwt_head) = iwt_repo.rev_parse("HEAD") else {
                 break;
             };
-            let wt = &worktrees[&task_name];
-            let Ok(prev_wt_head) = repo.rev_parse(&format!("concord/{run_id}/{task_name}")) else {
-                continue;
-            };
-
-            // Bring the complete integrated tree into `wt` (conflict-free fast-forward
-            // since `prev_wt_head` is already an ancestor of `prev_iwt_head`).
-            let Ok(m_in) = Repo::merge_into(
-                wt,
-                &prev_iwt_head,
-                &format!("concord: bring integrated codebase into {task_name} for final verification"),
-            ) else {
-                continue;
-            };
-            if !m_in.clean {
-                continue;
-            }
-            {
-                let mut st = shared.lock().expect("state");
-                let peer_revs: BTreeMap<String, String> = st
-                    .agents
-                    .iter()
-                    .filter(|(n, _)| *n != &task_name)
-                    .filter_map(|(n, a)| st.repo.rev_parse(&a.branch).ok().map(|h| (n.clone(), h)))
-                    .collect();
-                if let Some(a) = st.agents.get_mut(&task_name) {
-                    a.base = prev_iwt_head.clone();
-                    a.status = Status::Running;
-                    a.check_failures = None;
-                    a.stats.check_blocks = 0;
-                    a.peer_check_blocks = 0;
-                    for (pn, ph) in peer_revs {
-                        a.merged_producers.insert(pn.clone());
-                        a.merged_revs.insert(pn, ph);
-                    }
+            let mut repairs: Vec<(String, String)> = Vec::new();
+            let mut running = Vec::new();
+            for ft in failing.drain(..) {
+                let task_name = ft.name;
+                if attempts.get(&task_name).copied().unwrap_or(0) >= POST_MERGE_ATTEMPTS {
+                    continue;
                 }
-                st.log(
-                    "post_merge_resume",
-                    json!({ "agent": task_name, "failures": failing_ids.len().max(1) }),
+                let sid = results
+                    .get(&task_name)
+                    .map(|r| r.session_id.clone())
+                    .unwrap_or_default();
+                let Some(wt) = worktrees.get(&task_name) else {
+                    continue;
+                };
+                if sid.is_empty() {
+                    continue;
+                }
+                let Ok(prev_wt_head) = repo.rev_parse(&format!("concord/{run_id}/{task_name}")) else {
+                    continue;
+                };
+                // The agent's branch is already in the integrated head, so this
+                // brings in every teammate's code without conflicts.
+                let Ok(m_in) = Repo::merge_into(
+                    wt,
+                    &prev_iwt_head,
+                    &format!("concord: bring integrated codebase into {task_name} for final verification"),
+                ) else {
+                    continue;
+                };
+                if !m_in.clean {
+                    continue;
+                }
+                let failing_ids = ft.ids;
+                {
+                    let mut st = shared.lock().expect("state");
+                    let peer_revs: BTreeMap<String, String> = st
+                        .agents
+                        .iter()
+                        .filter(|(n, _)| *n != &task_name)
+                        .filter_map(|(n, a)| st.repo.rev_parse(&a.branch).ok().map(|h| (n.clone(), h)))
+                        .collect();
+                    if let Some(a) = st.agents.get_mut(&task_name) {
+                        a.base = prev_iwt_head.clone();
+                        a.status = Status::Running;
+                        a.check_failures = None;
+                        a.stats.check_blocks = 0;
+                        a.peer_check_blocks = 0;
+                        for (pn, ph) in peer_revs {
+                            a.merged_producers.insert(pn.clone());
+                            a.merged_revs.insert(pn, ph);
+                        }
+                    }
+                    st.log(
+                        "post_merge_resume",
+                        json!({ "agent": task_name, "round": round, "failures": failing_ids.len().max(1) }),
+                    );
+                }
+                let check_cmd = ft.cmd;
+                let mut msg = format!(
+                    "[concord] All parallel teammates' branches have now been integrated into your worktree, \
+                     so every teammate's feature is present and no failures are due to missing teammate code.\n\
+                     Your ticket's acceptance check (`{check_cmd}`) still has {} failing test(s):\n",
+                    failing_ids.len().max(1)
                 );
+                for id in failing_ids.iter().take(20) {
+                    msg.push_str(&format!("  {id}\n"));
+                }
+                msg.push_str(&format!(
+                    "Assertion details:\n{}\n\
+                     Fix these remaining failure(s) carefully without breaking any teammate's tests, \
+                     run `{check_cmd}` to verify it passes, then finish.",
+                    live::assertion_excerpt(&ft.output, 35)
+                ));
+                eprintln!("  reconciling integrated acceptance check for {task_name} (round {round})");
+                running.push(spawn_agent(
+                    cfg,
+                    AgentCtx {
+                        name: &task_name,
+                        worktree: wt,
+                        settings: &settings_paths[&task_name],
+                        shared: &shared,
+                        addr: &addr,
+                    },
+                    &msg,
+                    SessionArg::Resume(&sid),
+                    &agents_dir,
+                    cfg.resume_rounds + round,
+                )?);
+                *attempts.entry(task_name.clone()).or_default() += 1;
+                results.entry(task_name.clone()).or_default().resumed += 1;
+                repairs.push((task_name, prev_wt_head));
             }
-
-            let mut msg = format!(
-                "[concord] All parallel teammates' branches have now been integrated into your worktree, \
-                 so every teammate's feature is present and no failures are due to missing teammate code.\n\
-                 Your ticket's acceptance check (`{check_cmd}`) still has {} failing test(s):\n",
-                failing_ids.len().max(1)
-            );
-            for id in failing_ids.iter().take(20) {
-                msg.push_str(&format!("  {id}\n"));
+            if running.is_empty() {
+                break;
             }
-            msg.push_str(&format!(
-                "Assertion details:\n{}\n\
-                 Fix these remaining failure(s) carefully without breaking any teammate's tests, \
-                 run `{check_cmd}` to verify it passes, then finish.",
-                live::assertion_excerpt(&out_text, 35)
-            ));
+            wait_all(running, &mut results, &shared)?;
 
-            eprintln!("  reconciling integrated acceptance check for {task_name}");
-            let r = spawn_agent(
-                cfg,
-                AgentCtx {
-                    name: &task_name,
-                    worktree: wt,
-                    settings: &settings_paths[&task_name],
-                    shared: &shared,
-                    addr: &addr,
-                },
-                &msg,
-                SessionArg::Resume(&sid),
-                &agents_dir,
-                cfg.resume_rounds + 1,
-            )?;
-            results.entry(task_name.clone()).or_default().resumed += 1;
-            wait_all(vec![r], &mut results, &shared)?;
-            let _ = Repo::commit_if_dirty(wt, &format!("agent {task_name}: post-integration reconciliation"));
-
-            let Ok(new_wt_head) = repo.rev_parse(&format!("concord/{run_id}/{task_name}")) else {
-                continue;
-            };
-            let merged_back = Repo::merge_into(
-                &iwt,
-                &new_wt_head,
-                &format!("concord: integrate post-merge fix from {task_name}"),
-            );
-            let improved = match merged_back {
-                Ok(m) if m.clean => {
-                    let (after_failures, _) = evaluate_task_checks(&check_targets, &iwt);
-                    if after_failures < cur_failures {
-                        cur_failures = after_failures;
-                        true
-                    } else {
-                        false
+            for (task_name, prev_wt_head) in repairs {
+                let wt = &worktrees[&task_name];
+                let _ = Repo::commit_if_dirty(wt, &format!("agent {task_name}: post-integration reconciliation"));
+                let Ok(new_wt_head) = repo.rev_parse(&format!("concord/{run_id}/{task_name}")) else {
+                    continue;
+                };
+                let Ok(before) = iwt_repo.rev_parse("HEAD") else { break };
+                let msg = format!("concord: integrate post-merge fix from {task_name}");
+                let mut merged = Repo::merge_into(&iwt, &new_wt_head, &msg);
+                if allow_union
+                    && let Ok(o) = &merged
+                    && !o.clean
+                {
+                    let files = o.conflicted_files.clone();
+                    merged =
+                        Repo::merge_into_union(&iwt, &new_wt_head, &msg, &files, false, &crate::regions::verify_union);
+                }
+                let kept = match merged {
+                    Ok(m) if m.clean => {
+                        let (after, _) = evaluate_task_checks(&check_targets, &iwt);
+                        let better = after < cur_failures;
+                        if better {
+                            cur_failures = after;
+                        }
+                        better
+                    }
+                    _ => false,
+                };
+                shared.lock().expect("state").log(
+                    "post_merge_repair",
+                    json!({ "agent": task_name, "round": round, "kept": kept, "failures": cur_failures }),
+                );
+                if kept {
+                    if let Ok(sha) = iwt_repo.rev_parse("HEAD") {
+                        prefix_commits.push((task_name, sha));
+                    }
+                } else {
+                    let _ = iwt_repo.git(&["reset", "--hard", &before]);
+                    if let Ok(wt_repo) = Repo::open(wt) {
+                        let _ = wt_repo.git(&["reset", "--hard", &prev_wt_head]);
                     }
                 }
-                _ => false,
-            };
-            if !improved {
-                let _ = iwt_repo.git(&["reset", "--hard", &prev_iwt_head]);
-                if let Ok(wt_repo) = Repo::open(wt) {
-                    let _ = wt_repo.git(&["reset", "--hard", &prev_wt_head]);
-                }
-            } else if let Ok(sha) = iwt_repo.rev_parse("HEAD") {
-                prefix_commits.push((task_name, sha));
             }
+            failing = evaluate_task_checks(&check_targets, &iwt).1;
         }
     }
 
