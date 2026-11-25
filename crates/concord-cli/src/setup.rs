@@ -14,6 +14,7 @@ pub enum ClientTarget {
     Opencode,
     Claude,
     Cursor,
+    Antigravity,
 }
 
 impl std::str::FromStr for ClientTarget {
@@ -24,7 +25,8 @@ impl std::str::FromStr for ClientTarget {
             "opencode" => Ok(Self::Opencode),
             "claude" | "claude-code" => Ok(Self::Claude),
             "cursor" => Ok(Self::Cursor),
-            other => anyhow::bail!("unknown client {other:?} (expected: auto, opencode, claude, cursor)"),
+            "antigravity" | "agy" | "gemini" => Ok(Self::Antigravity),
+            other => anyhow::bail!("unknown client {other:?} (expected: auto, opencode, claude, cursor, antigravity)"),
         }
     }
 }
@@ -68,6 +70,12 @@ pub fn run_setup(opts: &SetupOptions) -> Result<Vec<String>> {
     let cursor_dir = home_dir()?.join(".cursor");
     if want_cursor && (opts.client == ClientTarget::Cursor || cursor_dir.is_dir()) {
         actions.push(setup_cursor(&cursor_dir, &exe, opts.model.as_deref())?);
+    }
+
+    let agy_dir = home_dir()?.join(".gemini");
+    let want_agy = matches!(opts.client, ClientTarget::All | ClientTarget::Antigravity);
+    if want_agy && (opts.client == ClientTarget::Antigravity || agy_dir.join("antigravity").is_dir()) {
+        actions.push(setup_antigravity(&agy_dir, &exe, opts.model.as_deref())?);
     }
 
     if actions.is_empty() {
@@ -193,6 +201,40 @@ fn setup_cursor(cursor_dir: &Path, exe: &str, model: Option<&str>) -> Result<Str
     Ok(format!("Cursor: wrote `concord` MCP entry to {}", path.display()))
 }
 
+/// Antigravity reads `~/.gemini/config/mcp_config.json` (`mcpServers` map, stdio
+/// transport). Its own worker CLI is not used by `concord_run`; the planning,
+/// inspection and merge tools run inside Antigravity, and `concord_run` spawns
+/// OpenCode or Claude Code workers (whichever is installed).
+fn setup_antigravity(gemini_dir: &Path, exe: &str, model: Option<&str>) -> Result<String> {
+    let worker = if !has_bin("opencode") && has_bin("claude") {
+        "claude"
+    } else {
+        "opencode"
+    };
+    let path = gemini_dir.join("config").join("mcp_config.json");
+    let mut root = read_json_object(&path)?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .context("`mcpServers` field in Antigravity mcp_config.json is not an object")?;
+    servers.insert(
+        "concord".into(),
+        json!({
+            "command": exe,
+            "args": build_mcp_args(worker, model)
+        }),
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&Value::Object(root))? + "\n")?;
+    Ok(format!(
+        "Antigravity: wrote `concord` MCP entry to {} (restart Antigravity to load it)",
+        path.display()
+    ))
+}
+
 fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
     if !path.is_file() {
         return Ok(Map::new());
@@ -211,6 +253,25 @@ fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_entry_is_merged_into_global_mcp_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("mcp_config.json"),
+            r#"{"mcpServers":{"other":{"command":"x","args":[]}}}"#,
+        )
+        .unwrap();
+        let msg = setup_antigravity(tmp.path(), "/usr/local/bin/concord", None).unwrap();
+        assert!(msg.contains("Antigravity"));
+        let parsed: Value =
+            serde_json::from_str(&std::fs::read_to_string(cfg_dir.join("mcp_config.json")).unwrap()).unwrap();
+        assert!(parsed["mcpServers"]["other"].is_object());
+        assert_eq!(parsed["mcpServers"]["concord"]["command"], "/usr/local/bin/concord");
+        assert_eq!(parsed["mcpServers"]["concord"]["args"][0], "mcp");
+    }
 
     #[test]
     fn write_opencode_json_merges_without_clobbering_existing_keys() {

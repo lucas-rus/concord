@@ -51,7 +51,7 @@
     </td>
     <td width="50%">
       <strong>12-Tool MCP Server &amp; One-Line Setup</strong><br/>
-      Connects to OpenCode, Claude Code, and Cursor with <code>concord setup</code>. Exposes <code>concord_plan</code>, <code>concord_symbols</code>, <code>concord_worktrees</code>, <code>concord_smart_merge</code>, and <code>concord_run</code>.
+      Connects to OpenCode, Claude Code, Cursor, and Antigravity with <code>concord setup</code>. Exposes <code>concord_plan</code>, <code>concord_symbols</code>, <code>concord_worktrees</code>, <code>concord_smart_merge</code>, and <code>concord_run</code>.
     </td>
   </tr>
   <tr>
@@ -152,6 +152,20 @@ OpenCode (one-line CLI, no JSON editing):
 opencode mcp add --global concord -- concord mcp --agent-cli opencode
 ```
 
+Antigravity (writes `~/.gemini/config/mcp_config.json`; restart Antigravity afterwards):
+
+```bash
+concord setup --client antigravity
+```
+
+or add it by hand to `~/.gemini/config/mcp_config.json`:
+
+```json
+{ "mcpServers": { "concord": { "command": "concord", "args": ["mcp", "--agent-cli", "opencode"] } } }
+```
+
+All planning, inspection, and merge tools run directly inside Antigravity. `concord_run` launches its parallel workers with OpenCode or Claude Code (`--agent-cli opencode|claude`), so one of them must be installed to use team runs.
+
 Claude Code (plugin with the MCP server and a `concord-team` skill):
 
 ```text
@@ -222,7 +236,7 @@ Protocol simulation (notices each agent would receive)
 Other commands:
 
 ```bash
-concord setup                                   # auto-connect OpenCode, Claude Code, and Cursor MCP
+concord setup                                   # auto-connect OpenCode, Claude Code, Cursor, and Antigravity MCP
 concord plan --rev HEAD                         # identify shared hubs & producer-first parallel ticket clusters
 concord symbols src/                            # symbol contracts & spans (Py, TS/JS, Rust, Go, C/C++, SQL/Prisma/Proto/OpenAPI)
 concord diff old.py new.py                      # contract vs. body changes between two versions

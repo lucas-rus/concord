@@ -136,7 +136,7 @@ enum Command {
     },
     /// Automatically connect Concord's MCP server to OpenCode, Claude Code, and Cursor.
     Setup {
-        /// Target client: auto (default), opencode, claude, or cursor.
+        /// Target client: auto (default), opencode, claude, cursor, or antigravity.
         #[arg(long, default_value = "auto")]
         client: String,
         /// Optional default model passed to `concord mcp --model`.

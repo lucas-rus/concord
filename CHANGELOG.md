@@ -2,7 +2,10 @@
 
 All notable changes to **Concord** are documented in this file.
 
-## [0.1.6] — 2026-11-25
+## [0.1.7] - 2026-11-25
+- `concord setup --client antigravity` registers the MCP server in Antigravity's global `~/.gemini/config/mcp_config.json`; `auto` detects an Antigravity installation.
+
+## [0.1.6] - 2026-11-25
 - **C / C++ front-end** (`tree-sitter-cpp`): `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx` with header prototypes, namespaces, class/out-of-line methods, `#include` bindings, and call-conformance checks.
 - **Cross-language HTTP route contracts**: links FastAPI/Flask, Express/Hono/Fastify, and Next.js App Router handlers (`http.<METHOD>.<path>`) directly to frontend `fetch()` and `axios` calls.
 - **Multi-wave milestone runner**: `concord run --milestones waves.json` chains parallel agent waves automatically.
