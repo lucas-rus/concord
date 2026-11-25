@@ -31,21 +31,6 @@ Concord is an orchestration engine for running several AI coding agents (Claude 
 | **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
 | **`Orchestrator + Concord` (autonomous MCP split)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **8.6 min (team)** |
 
-**A small project built by a team.** Three Haiku agents build [`conta`](examples/conta) (an offline version of a Romanian invoice-processing pipeline) over three milestones, each split into three parallel tickets in which one agent changes an interface the others use. Hidden acceptance tests, validated against a reference solution, check the integrated result. 3 runs per condition ([eval/project](eval/project)):
-
-| | hidden tests passed (of 33) | milestones complete | merge conflicts |
-|---|---|---|---|
-| without Concord | 15.3 (46%) | 0 / 9 | 3 / 9 |
-| contract layer only | 24.0 (73%) | 3 / 9 | 3 / 9 |
-| peer merge only | 22.0 (67%) | 3 / 9 | 0 / 9 |
-| **Concord (both)** | **32.0 (97%)** | **7 / 9** | **0 / 9** |
-
-The two mechanisms fix different failures: the contract layer fixes interface changes (removed or changed functions other agents call), and peer merge fixes overlapping edits.
-
-**CooperBench pairs with agents.** 32 randomly sampled CooperBench feature pairs (jinja, click, dirty-equals, dspy), two Haiku agents each, judged by CooperBench's hidden tests ([eval/coop](eval/coop)): both features pass in **1/32** pairs without Concord and **13/32** with Concord (p = 0.0005, exact McNemar). Most CooperBench failures are overlapping edits, which peer merge resolves.
-
-**Shop scenario.** Three agents on ordinary tickets, one of which makes `currency` a required argument of `price_order` ([eval/live](eval/live/README.md)): integrated tests pass in **0/3** runs without Concord and **3/3** with it (Haiku, ≈ $0.03 per run).
-
 ## The problem
 
 Today's parallel-agent setups give each agent its own git worktree. That stops agents from overwriting each other's files, but not from **breaking each other's code**:
