@@ -7,29 +7,7 @@
 
 Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work.
 
-> **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, Go, C/C++, and schemas (SQL, Prisma, Protobuf, OpenAPI)** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), conflict-aware task planner (`concord plan`), live `git worktree` inspector (`concord worktrees`), contract-verified smart merge (`concord merge --type-check`), SASE Merge-Readiness Packs (`concord mrp`), and a 12-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md).
-
-## Results with real agents
-
-**Twelve agents building a full CommonMark 0.31.2 parser in parallel ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
-
-| Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
-|---|---|---|---|---|
-| `sequential` (1 agent, ticket-by-ticket) | 645 / 652 (98.9%) | 0 | 0 | 157.1 min (1.0×) |
-| `parallel-off` (12 agents, uncoordinated) | 374 / 652 (57.4%) | 268 | 9 / 12 branches | 29.0 min |
-| `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
-| **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
-
-**Cross-language generalization: six agents building a TypeScript 5 (`strict`) dispatch engine (`dispecerat`) with zero per-ticket test hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
-
-| Condition | Held-out spec (of 48) | Cross-ticket synergy | Integration loss | Merge conflicts | Wall-clock time |
-|---|---|---|---|---|---|
-| `sequential` (1 agent, ticket-by-ticket) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 | 13.3 min (1.0×) |
-| `parallel-off` (6 agents, uncoordinated) | 21 / 48 (43.8%) | 0 / 6 | 21 | 3 / 6 | 6.0 min |
-| `parallel-fileleases` (6 agents, file locks) | 14 / 48 (29.2%) | 0 / 6 | 25 | 4 / 6 | 7.7 min |
-| `parallel-integrator` (6 agents + 7th integrator) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 (7th agent) | 11.7 min (1.13×) |
-| **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
-| **`Orchestrator + Concord` (autonomous MCP split)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **8.6 min (team)** |
+> **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, Go, C/C++, and schemas (SQL, Prisma, Protobuf, OpenAPI)** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), conflict-aware task planner (`concord plan`), Tier-2 native type checking (`concord typecheck` / `concord merge --type-check`), live `git worktree` inspector (`concord worktrees`), SASE Merge-Readiness Packs (`concord mrp`), one-command MCP setup (`concord setup`), and a 12-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md) or jump directly to the [benchmark results & tests below](#benchmark-results).
 
 ## The problem
 
@@ -60,6 +38,28 @@ Files are the wrong unit of coordination. Agents break each other through **cont
    Only concurrent edits to the *same contract* are serialised, through a short lease.
 3. **Precise notices + finish gate.** When a contract changes, Concord sends a short, generated notice only to the agents whose footprint depends on it. The notice has the old and new contract and the recipient's exact call sites. An agent cannot finish while it depends on a stale contract.
 4. **Speculative integration.** In the background, all branches are merged in memory, type-checked, and the affected tests are run, to catch whatever the contract model misses.
+
+## Benchmark results
+
+**Twelve agents building a full CommonMark 0.31.2 parser in parallel ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
+
+| Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
+|---|---|---|---|---|
+| `sequential` (1 agent, ticket-by-ticket) | 645 / 652 (98.9%) | 0 | 0 | 157.1 min (1.0×) |
+| `parallel-off` (12 agents, uncoordinated) | 374 / 652 (57.4%) | 268 | 9 / 12 branches | 29.0 min |
+| `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
+| **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
+
+**Cross-language generalization: six agents building a TypeScript 5 (`strict`) dispatch engine (`dispecerat`) with zero per-ticket test hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
+
+| Condition | Held-out spec (of 48) | Cross-ticket synergy | Integration loss | Merge conflicts | Wall-clock time |
+|---|---|---|---|---|---|
+| `sequential` (1 agent, ticket-by-ticket) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 | 13.3 min (1.0×) |
+| `parallel-off` (6 agents, uncoordinated) | 21 / 48 (43.8%) | 0 / 6 | 21 | 3 / 6 | 6.0 min |
+| `parallel-fileleases` (6 agents, file locks) | 14 / 48 (29.2%) | 0 / 6 | 25 | 4 / 6 | 7.7 min |
+| `parallel-integrator` (6 agents + 7th integrator) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 (7th agent) | 11.7 min (1.13×) |
+| **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
+| **`Orchestrator + Concord` (autonomous MCP split)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **8.6 min (team)** |
 
 ## Install and use it from your agent (MCP)
 
@@ -94,7 +94,7 @@ Claude Code (plugin with the MCP server and a `concord-team` skill):
 **MCP Tools (12):**
 - **Planning, contract inspection & smart merging (for any agent workflow):**
   - `concord_plan` — partition the repository symbol graph into shared contract hubs and producer-first parallel ticket clusters
-  - `concord_symbols` — list symbol signatures and line spans without function bodies (~10× fewer tokens than reading whole files; Python, TS/JS, Rust, Go, SQL, Prisma, Protobuf, OpenAPI)
+  - `concord_symbols` — list symbol signatures and line spans without function bodies (~10× fewer tokens than reading whole files; Python, TS/JS, Rust, Go, C/C++, SQL, Prisma, Protobuf, OpenAPI)
   - `concord_diff_contracts` — contract-level diff between revisions or working tree, with impacted callers
   - `concord_worktrees` — zero-mutation live check across all active `git worktree` checkouts (Claude Squad, Cursor worktrees, manual worktrees)
   - `concord_analyze` — check concurrent branches for cross-file contract violations, duplicate symbols, and textual overlaps
@@ -149,10 +149,13 @@ Protocol simulation (notices each agent would receive)
 Other commands:
 
 ```bash
-concord symbols src/                            # symbol contracts & spans across files/dirs (Py, TS/JS, Rust, Go)
+concord setup                                   # auto-connect OpenCode, Claude Code, and Cursor MCP
+concord plan --rev HEAD                         # identify shared hubs & producer-first parallel ticket clusters
+concord symbols src/                            # symbol contracts & spans (Py, TS/JS, Rust, Go, C/C++, SQL/Prisma/Proto/OpenAPI)
 concord diff old.py new.py                      # contract vs. body changes between two versions
 concord worktrees --base main                   # inspect all active git worktrees (incl. uncommitted edits)
-concord merge --base main b1 b2 --into merged   # contract-ordered smart merge + verified union + conformance check
+concord typecheck --repo .                      # auto-detect & run Tier-2 checker (tsc, pyright/ty, cargo check, go vet)
+concord merge --base main b1 b2 --type-check    # contract-ordered smart merge + verified union + conformance + type check
 concord mrp .concord/runs/<run-id>              # render SASE Merge-Readiness Pack (markdown or --json)
 concord analyze --base main b1 b2 --json        # machine-readable output (for CI & experiments)
 concord run --tasks tasks.json --mode enforce --regions --test-cmd "npm test"
@@ -219,10 +222,10 @@ flowchart LR
 
 | Crate | Role | Status |
 |---|---|---|
-| [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, coherence protocol (leases, duplicate-symbol guard, negotiation, finish gate), pairwise conflict analysis | ✅ Complete |
-| [`concord-lang`](crates/concord-lang) | Tree-sitter front-ends: symbols, normalised contracts, body digests, imports, reference resolution, affected-test graph | ✅ Python, TypeScript/JS, Rust, Go |
+| [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, coherence protocol (leases, duplicate-symbol guard, negotiation, finish gate), pairwise conflict analysis, exhaustive BFS formal model checker | ✅ Complete |
+| [`concord-lang`](crates/concord-lang) | Tree-sitter & schema front-ends: symbols, normalised contracts, body digests, imports, reference resolution, affected-test graph | ✅ Python, TS/JS, Rust, Go, C/C++, Schemas |
 | [`concord-git`](crates/concord-git) | Git plumbing: tree reading, in-memory `merge-tree`, patience/diff3 verified insertion-union, worktree snapshots & listing | ✅ Complete |
-| [`concord-cli`](crates/concord-cli) | `concord` binary: `symbols`, `diff`, `analyze`, `worktrees`, `merge`, `mrp`, `run`, `watch`, `mcp` (11 MCP tools + live TCP daemon) | ✅ Complete |
+| [`concord-cli`](crates/concord-cli) | `concord` binary: `setup`, `plan`, `symbols`, `diff`, `analyze`, `worktrees`, `typecheck`, `merge`, `mrp`, `run`, `watch`, `mcp` (12 MCP tools + authenticated TCP daemon) | ✅ Complete |
 
 **Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), **Go** (`.go`), **C/C++** (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`), and **schema/API contracts** (`.sql`, `.prisma`, `.proto`, OpenAPI `.json`/`.yaml`). Files in other languages still participate in textual/structural merge checks and file-existence guards.
 
