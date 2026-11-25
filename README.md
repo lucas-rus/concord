@@ -132,13 +132,14 @@ Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled fe
 
 Concord runs locally, next to your repository, as an [MCP](https://modelcontextprotocol.io) server. Your coding agent (OpenCode, Claude Code, Cursor, or any MCP client) gets 12 tools to plan, coordinate, verify, and merge parallel work automatically.
 
-**1. Install & auto-connect in one command** (macOS, Linux):
+**1. Install & auto-connect** (macOS, Linux):
 
 ```bash
+# Homebrew (macOS & Linux):
+brew install lucas-rus/tap/concordmcp && concord setup
+
+# Or curl installer:
 curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh -s -- --setup
-# or install first, then run setup separately:
-curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh
-concord setup   # auto-connects OpenCode, Claude Code, and Cursor
 ```
 
 *(From source with Rust ≥ 1.90: `cargo install --git https://github.com/lucas-rus/concord concord-cli && concord setup`.)*
