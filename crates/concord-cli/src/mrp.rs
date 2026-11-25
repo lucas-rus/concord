@@ -193,6 +193,8 @@ pub struct SmartMergeConfig {
     pub into_branch: Option<String>,
     pub test_cmd: Option<String>,
     pub merge_driver: Option<String>,
+    /// Run Tier-2 native type checker (`tsc`, `pyright`/`ty`, `cargo check`, `go vet`) on merged tree.
+    pub type_check: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -207,6 +209,8 @@ pub struct SmartMergeReport {
     pub conflicts: BTreeMap<String, Vec<String>>,
     pub post_merge_violations: Vec<String>,
     pub parse_errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_check: Option<crate::typecheck::TypeCheckResult>,
     pub tests_passed: Option<bool>,
     pub tests_output_tail: String,
     /// If `tests_passed == Some(false)`, binary bisection identifies the first
@@ -415,6 +419,12 @@ pub fn smart_merge(cfg: &SmartMergeConfig) -> Result<SmartMergeReport> {
         None => (Vec::new(), Vec::new()),
     };
 
+    let type_check = if cfg.type_check && conflicts.is_empty() {
+        crate::typecheck::run_type_check(&wt)
+    } else {
+        None
+    };
+
     let (tests_passed, tests_output_tail, bisected_culprit) = match &cfg.test_cmd {
         Some(cmd) => {
             let (ok, tail) = run_shell(cmd, &wt);
@@ -430,8 +440,10 @@ pub fn smart_merge(cfg: &SmartMergeConfig) -> Result<SmartMergeReport> {
         None => (None, String::new(), None),
     };
 
+    let tc_ok = type_check.as_ref().is_none_or(|t| !t.available || t.ok);
     if let (Some(target), Some(mc)) = (&cfg.into_branch, &merged_commit)
         && conflicts.is_empty()
+        && tc_ok
     {
         repo.git(&["branch", "-f", target, mc])?;
     }
@@ -450,6 +462,7 @@ pub fn smart_merge(cfg: &SmartMergeConfig) -> Result<SmartMergeReport> {
         conflicts,
         post_merge_violations,
         parse_errors,
+        type_check,
         tests_passed,
         tests_output_tail,
         bisected_culprit,
@@ -487,6 +500,21 @@ pub fn render_smart_merge(r: &SmartMergeReport) -> String {
         s.push_str("  Post-merge contract violations:\n");
         for v in &r.post_merge_violations {
             let _ = writeln!(s, "    - {v}");
+        }
+    }
+    if let Some(tc) = &r.type_check {
+        let status = if !tc.available {
+            "skipped (not installed)"
+        } else if tc.ok {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        let _ = writeln!(s, "  Tier-2 type check ({}): {status}", tc.tool);
+        if tc.available && !tc.ok {
+            for d in tc.diagnostics.iter().take(10) {
+                let _ = writeln!(s, "    - {d}");
+            }
         }
     } else {
         s.push_str("  Post-merge contract conformance: PASS (0 broken call sites)\n");

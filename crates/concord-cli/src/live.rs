@@ -2071,20 +2071,40 @@ fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
 
 /// Serve hook requests on `listener` until the process exits.
 pub fn serve(listener: TcpListener, shared: Shared) {
+    serve_with_auth(listener, shared, None);
+}
+
+/// Serve hook and IPC requests on `listener`, optionally requiring a shared
+/// bearer token (`CONCORD_AUTH_TOKEN`) for remote/containerized agent sandboxes.
+pub fn serve_with_auth(listener: TcpListener, shared: Shared, auth_token: Option<String>) {
+    let token = std::sync::Arc::new(auth_token);
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
         let shared = shared.clone();
+        let token = token.clone();
         std::thread::spawn(move || {
-            let _ = serve_one(stream, &shared);
+            let _ = serve_one(stream, &shared, token.as_deref());
         });
     }
 }
 
-fn serve_one(stream: TcpStream, shared: &Shared) -> Result<()> {
+fn serve_one(stream: TcpStream, shared: &Shared, expected_token: Option<&str>) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let req: Value = serde_json::from_str(&line)?;
+    if let Some(expected) = expected_token {
+        let provided = req.get("token").and_then(Value::as_str).unwrap_or("");
+        if provided != expected {
+            let mut w = stream;
+            writeln!(
+                w,
+                "{}",
+                json!({ "stdout": "{\"error\":\"unauthorized\"}", "exit_code": 1 })
+            )?;
+            return Ok(());
+        }
+    }
     let agent = req.get("agent").and_then(Value::as_str).unwrap_or("");
     let event = req.get("event").and_then(Value::as_str).unwrap_or("");
     let input = req.get("input").cloned().unwrap_or(Value::Null);
@@ -2098,7 +2118,8 @@ fn serve_one(stream: TcpStream, shared: &Shared) -> Result<()> {
 /// a running Concord daemon at `addr` and parse the JSON `stdout` payload.
 pub fn daemon_request(addr: &str, agent: &str, event: &str, input: &Value) -> Result<Value> {
     let mut stream = TcpStream::connect(addr).with_context(|| format!("connecting to concord daemon at {addr}"))?;
-    let req = json!({ "agent": agent, "event": event, "input": input });
+    let token = std::env::var("CONCORD_AUTH_TOKEN").ok();
+    let req = json!({ "agent": agent, "event": event, "input": input, "token": token });
     writeln!(stream, "{req}")?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
@@ -2117,7 +2138,8 @@ pub fn hook_client(addr: &str, agent: &str, event: &str) -> i32 {
     let Ok(mut stream) = TcpStream::connect(addr) else {
         return 0;
     };
-    let req = json!({ "agent": agent, "event": event, "input": input });
+    let token = std::env::var("CONCORD_AUTH_TOKEN").ok();
+    let req = json!({ "agent": agent, "event": event, "input": input, "token": token });
     if writeln!(stream, "{req}").is_err() {
         return 0;
     }

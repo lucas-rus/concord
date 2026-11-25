@@ -96,6 +96,9 @@ enum Command {
         /// Optional structured merge driver executable (e.g. `mergiraf`).
         #[arg(long)]
         merge_driver: Option<String>,
+        /// Run Tier-2 native type checker (tsc, pyright/ty, cargo check, go vet) on the merged tree.
+        #[arg(long)]
+        type_check: bool,
         #[arg(long)]
         json: bool,
     },
@@ -372,6 +375,7 @@ fn main() -> Result<()> {
             into,
             test_cmd,
             merge_driver,
+            type_check,
             json,
         } => {
             let res = smart_merge(&SmartMergeConfig {
@@ -381,9 +385,13 @@ fn main() -> Result<()> {
                 into_branch: into,
                 test_cmd,
                 merge_driver,
+                type_check,
             })?;
-            let clean =
-                res.conflicts.is_empty() && res.post_merge_violations.is_empty() && res.tests_passed.unwrap_or(true);
+            let tc_ok = res.type_check.as_ref().is_none_or(|t| !t.available || t.ok);
+            let clean = res.conflicts.is_empty()
+                && res.post_merge_violations.is_empty()
+                && res.tests_passed.unwrap_or(true)
+                && tc_ok;
             if json {
                 println!("{}", serde_json::to_string_pretty(&res)?);
             } else {

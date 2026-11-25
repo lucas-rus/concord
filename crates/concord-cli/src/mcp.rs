@@ -96,7 +96,8 @@ fn tools() -> Value {
                     "base": { "type": "string", "description": "Base revision to start integration from (default: HEAD)." },
                     "into_branch": { "type": "string", "description": "Optional branch name to create/update when merge is clean." },
                     "test_cmd": { "type": "string", "description": "Optional shell command to verify integrated code (bisects culprit branch on failure)." },
-                    "merge_driver": { "type": "string", "description": "Optional external structured merge binary (e.g. 'mergiraf')." }
+                    "merge_driver": { "type": "string", "description": "Optional external structured merge binary (e.g. 'mergiraf')." },
+                    "type_check": { "type": "boolean", "description": "Run Tier-2 native type checker (tsc, pyright/ty, cargo check, go vet) on the merged tree." }
                 },
                 "required": ["branches"]
             }
@@ -472,6 +473,7 @@ fn tool_smart_merge(root: &Path, args: &Value) -> Result<String> {
     let into_branch = args.get("into_branch").and_then(Value::as_str).map(str::to_owned);
     let test_cmd = args.get("test_cmd").and_then(Value::as_str).map(str::to_owned);
     let merge_driver = args.get("merge_driver").and_then(Value::as_str).map(str::to_owned);
+    let type_check = args.get("type_check").and_then(Value::as_bool).unwrap_or(false);
     let rep = smart_merge(&SmartMergeConfig {
         repo: root.to_path_buf(),
         base,
@@ -479,6 +481,7 @@ fn tool_smart_merge(root: &Path, args: &Value) -> Result<String> {
         into_branch,
         test_cmd,
         merge_driver,
+        type_check,
     })?;
     Ok(render_smart_merge(&rep))
 }

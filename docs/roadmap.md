@@ -42,10 +42,10 @@ Aligned with the BSc thesis work plan and open-source product roadmap.
 
 ## M4: Post-Thesis & Open-Source v1.0 Roadmap (Future Use Cases)
 
-- [x] **Compiler / Type-Checker Precision Layer (`concord typecheck`)**: Auto-detect and run `tsc --noEmit`, `ty`/`basedpyright`/`pyright`, `cargo check`, or `go vet` for inferred/duck-typed/polymorphic checks alongside sub-50ms Tree-sitter Tier 1 (optional LSP/SCIP sidecar remains future work)
+- [x] **Compiler / Type-Checker Precision Layer (`concord typecheck` & `concord merge --type-check`)**: Auto-detect and run `tsc --noEmit`, `ty`/`basedpyright`/`pyright`, `cargo check`, or `go vet` both standalone and as a merge-readiness gate in `concord merge` / `concord_smart_merge` (optional LSP/SCIP sidecar remains future work)
 - [x] **GitHub Cross-PR Action (`action.yml`)**: Reusable composite GitHub Action running `concord analyze` across all concurrently open PRs targeting `main`
 - [x] **Schema & Pseudo-Symbol Contracts (`concord-lang::schema`)**: SQL DDL (`.sql`), Prisma (`.prisma`), Protocol Buffers (`.proto`), and OpenAPI/Swagger specs (`.json`/`.yaml`/`.yml`) indexed into the shared symbol graph (`db.*`, `prisma.*`, `proto.*`, `api.*`)
 - [x] **Conflict-Aware Task Partitioner (`concord plan` + `concord_plan` MCP tool)**: Dependency-graph partitioner identifying shared contract hubs and recommending producer-first parallel ticket clusters
-- [ ] **Distributed Cloud / Container Daemon**: Authenticated Unix-socket / mTLS HTTP transport + SQLite WAL event persistence so remote containerized agents (SWE-bench / OpenHands sandboxes / Kubernetes runners) share one live coherence directory
+- [x] **Authenticated Remote / Container Daemon (`live::serve_with_auth` + `CONCORD_AUTH_TOKEN`)**: Bearer-token authenticated TCP IPC for containerized/remote agent sandboxes (SQLite WAL persistence & mTLS remain future work)
 - [ ] **Interactive IDE / Agentic Cockpit Extension**: VS Code / Cursor / Zed panel + `ratatui` TUI visualizing live symbol leases, contract diffs, and one-click MRP approval
-- [ ] **Formal Protocol Verification**: TLA+ / Stateright model checking of the combined Contract + Region + Waits-For rank-acyclic state machine
+- [x] **Formal Protocol Verification (`crates/concord-core/tests/protocol_model_check.rs`)**: Bounded exhaustive BFS state-space model checking of Concord's Coherence Directory proving Lease Exclusivity, Finish-Gate Soundness, Duplicate-Symbol Safety, and Deadlock-Freedom across all reachable interleavings
