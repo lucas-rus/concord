@@ -1,13 +1,72 @@
-# Concord
+<h1 align="center">Concord</h1>
 
-**Contract-level coherence for parallel AI coding agents.**
+<p align="center">
+  <strong>Contract-level coherence and smart merging for parallel AI coding agents.</strong>
+</p>
 
-[![CI](https://github.com/lucas-rus/concord/actions/workflows/ci.yml/badge.svg)](https://github.com/lucas-rus/concord/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+<p align="center">
+  <a href="https://github.com/lucas-rus/concord/actions/workflows/ci.yml"><img src="https://github.com/lucas-rus/concord/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/lucas-rus/concord/releases/latest"><img src="https://img.shields.io/github/v/release/lucas-rus/concord?color=38bdf8&label=release" alt="Latest Release" /></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-818cf8.svg" alt="License" /></a>
+  <a href="#install-and-use-it-from-your-agent-mcp"><img src="https://img.shields.io/badge/MCP-12%20tools-34d399.svg" alt="12 MCP Tools" /></a>
+  <a href="#benchmark-results"><img src="https://img.shields.io/badge/CommonMark-652%2F652%20(5.0x)-10b981.svg" alt="CommonMark 652/652" /></a>
+  <a href="#benchmark-results"><img src="https://img.shields.io/badge/Dispecerat%20TS-48%2F48%20(2.2x)-10b981.svg" alt="Dispecerat 48/48" /></a>
+</p>
 
-Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work.
+<p align="center">
+  <a href="#the-problem">The Problem</a> ·
+  <a href="#the-idea">How It Works</a> ·
+  <a href="#benchmark-results">Benchmark Results</a> ·
+  <a href="#install-and-use-it-from-your-agent-mcp">Quick Install</a> ·
+  <a href="#try-it-from-the-command-line">CLI</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="docs/roadmap.md">Roadmap</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-> **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, Go, C/C++, and schemas (SQL, Prisma, Protobuf, OpenAPI)** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), conflict-aware task planner (`concord plan`), Tier-2 native type checking (`concord typecheck` / `concord merge --type-check`), live `git worktree` inspector (`concord worktrees`), SASE Merge-Readiness Packs (`concord mrp`), one-command MCP setup (`concord setup`), and a 12-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md) or jump directly to the [benchmark results & tests below](#benchmark-results).
+---
+
+**Concord** is an orchestration engine and MCP server for running multiple AI coding agents (OpenCode, Claude Code, Cursor, ...) **at the same time on the same repository** without them silently breaking each other's work.
+
+> [!NOTE]
+> **Jump straight to the [Benchmark Results & Tests below](#benchmark-results):** **652/652 (100.0%)** on 12-agent Python CommonMark (`5.0×` speedup, `0` conflicts) and **48/48 (100.0%)** on 6-agent TypeScript `dispecerat` (`2.20×` speedup, `0` conflicts, zero per-ticket test hints).
+
+### Highlights
+
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Contract-Level Coherence</strong><br/>
+      Separates symbol <em>contracts</em> (signatures, types, exports, schemas) from <em>bodies</em>. Body edits never block; breaking contract edits trigger surgical notices only to affected callers.
+    </td>
+    <td width="50%">
+      <strong>Region Coherence &amp; Verified Union</strong><br/>
+      Detects overlapping edits live, resolves pure two-sided insertions via patience/diff3 + AST verification, and eliminates duplicate symbol definitions before merge.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>Polyglot &amp; Full-Stack Contracts</strong><br/>
+      Python, TypeScript/JS (incl. <code>@/</code> aliases), Rust, Go, C/C++, SQL/Prisma/Protobuf/OpenAPI schemas, and cross-language HTTP routes (FastAPI/Express/Next.js ↔ <code>fetch</code>/<code>axios</code>).
+    </td>
+    <td width="50%">
+      <strong>12-Tool MCP Server &amp; One-Line Setup</strong><br/>
+      Connects to OpenCode, Claude Code, and Cursor with <code>concord setup</code>. Exposes <code>concord_plan</code>, <code>concord_symbols</code>, <code>concord_worktrees</code>, <code>concord_smart_merge</code>, and <code>concord_run</code>.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>SASE Merge-Readiness Packs &amp; Tier-2 Typecheck</strong><br/>
+      Emits auditable <code>mrp.md</code> / <code>mrp.json</code> reports, runs <code>tsc</code>/<code>pyright</code>/<code>cargo check</code>/<code>go vet</code> via <code>--type-check</code>, and bisects test regressions in <em>O</em>(log <em>k</em>).
+    </td>
+    <td width="50%">
+      <strong>Formally Verified Protocol</strong><br/>
+      Exhaustive BFS model checking proves Lease Exclusivity, Finish-Gate Soundness, Duplicate-Symbol Safety, and Deadlock-Freedom across reachable agent interleavings.
+    </td>
+  </tr>
+</table>
+
+---
 
 ## The problem
 
@@ -28,7 +87,7 @@ The two agents touch different files, so git merges cleanly, file locks see no c
 
 ## The idea
 
-Files are the wrong unit of coordination. Agents break each other through **contracts**: the signatures, types, exported names and schemas that other code depends on. Concord treats every agent's worktree like a CPU cache and every symbol like a cache line, and runs a **coherence protocol** over them:
+Files are the wrong unit of coordination. Agents break each other through **contracts**: the signatures, types, exported names, routes, and schemas that other code depends on. Concord treats every agent's worktree like a CPU cache and every symbol like a cache line, and runs a **coherence protocol** over them:
 
 1. **Infer, don't ask.** It watches what each agent actually reads and edits (hooks, diffs) and maps it onto a symbol graph, giving a *footprint* per agent: symbols read, written, and used by the agent's new code.
 2. **Contract vs. body, breaking vs. compatible.** Every symbol is split into its contract and its body. Body edits never block anyone. Contract changes are classified from structured signatures:
@@ -39,9 +98,13 @@ Files are the wrong unit of coordination. Agents break each other through **cont
 3. **Precise notices + finish gate.** When a contract changes, Concord sends a short, generated notice only to the agents whose footprint depends on it. The notice has the old and new contract and the recipient's exact call sites. An agent cannot finish while it depends on a stale contract.
 4. **Speculative integration.** In the background, all branches are merged in memory, type-checked, and the affected tests are run, to catch whatever the contract model misses.
 
+---
+
 ## Benchmark results
 
-**Twelve agents building a full CommonMark 0.31.2 parser in parallel ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
+### 1. Python — 12 Agents Building a Full CommonMark 0.31.2 Parser ([`concord-bench`](https://github.com/lucas-rus/concord-bench))
+
+Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
 
 | Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
 |---|---|---|---|---|
@@ -50,7 +113,9 @@ Files are the wrong unit of coordination. Agents break each other through **cont
 | `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
 | **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
 
-**Cross-language generalization: six agents building a TypeScript 5 (`strict`) dispatch engine (`dispecerat`) with zero per-ticket test hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
+### 2. TypeScript 5 (`strict`) — 6 Agents Building `dispecerat` with Zero Per-Ticket Test Hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench))
+
+Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
 
 | Condition | Held-out spec (of 48) | Cross-ticket synergy | Integration loss | Merge conflicts | Wall-clock time |
 |---|---|---|---|---|---|
@@ -61,9 +126,11 @@ Files are the wrong unit of coordination. Agents break each other through **cont
 | **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
 | **`Orchestrator + Concord` (autonomous MCP split)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **8.6 min (team)** |
 
+---
+
 ## Install and use it from your agent (MCP)
 
-Concord runs locally, next to your repository, as an [MCP](https://modelcontextprotocol.io) server. Your coding agent (OpenCode, Claude Code, any MCP client) gets tools to start a **team of parallel agents** on the repository, follow it, and fetch one integrated branch; you just ask it in plain language ("split this into parallel tickets and run them with Concord").
+Concord runs locally, next to your repository, as an [MCP](https://modelcontextprotocol.io) server. Your coding agent (OpenCode, Claude Code, Cursor, or any MCP client) gets 12 tools to plan, coordinate, verify, and merge parallel work automatically.
 
 **1. Install & auto-connect in one command** (macOS, Linux):
 
@@ -98,10 +165,12 @@ Claude Code (plugin with the MCP server and a `concord-team` skill):
   - `concord_diff_contracts` — contract-level diff between revisions or working tree, with impacted callers
   - `concord_worktrees` — zero-mutation live check across all active `git worktree` checkouts (Claude Squad, Cursor worktrees, manual worktrees)
   - `concord_analyze` — check concurrent branches for cross-file contract violations, duplicate symbols, and textual overlaps
-  - `concord_smart_merge` — merge branches producer-first with AST-verified insertion union, post-merge call conformance, and $O(\log k)$ test failure bisection
+  - `concord_smart_merge` — merge branches producer-first with AST-verified insertion union, post-merge call conformance, optional `--type-check`, and $O(\log k)$ test failure bisection
   - `concord_negotiate` / `concord_ack` — propose a signature adjustment to a symbol's live owner or acknowledge a peer's contract change
 - **Parallel team orchestration:**
   - `concord_run`, `concord_status`, `concord_result` (includes SASE Merge-Readiness Pack), `concord_cancel`
+
+---
 
 ## Try it from the command line
 
@@ -117,7 +186,8 @@ examples/running-example/setup.sh /tmp/concord-demo
 ./target/release/concord analyze --repo /tmp/concord-demo --base main agent-a agent-b agent-c --notices
 ```
 
-Output (abridged):
+<details>
+<summary><strong>View example CLI output (cross-file breaking parameter detection)</strong></summary>
 
 ```text
 Findings
@@ -146,6 +216,8 @@ Protocol simulation (notices each agent would receive)
      agent-c: open
 ```
 
+</details>
+
 Other commands:
 
 ```bash
@@ -162,7 +234,18 @@ concord run --tasks tasks.json --mode enforce --regions --test-cmd "npm test"
 concord run --milestones waves.json --mode enforce --regions --test-cmd "npm test"
 ```
 
+> [!NOTE]
 > **Zero-config acceptance gating:** `tasks.json` only needs `[{"name": "...", "prompt": "..."}]` — when per-ticket `check` commands are omitted, Concord automatically uses `--test-cmd` for finish-gate verification, cross-agent regression gating, and $O(\log k)$ post-merge failure bisection.
+
+### GitHub Cross-PR CI Action
+
+Drop [`action.yml`](action.yml) into any workflow to cross-check concurrently open PRs for silent contract breaks:
+
+```yaml
+- uses: lucas-rus/concord@main
+  with:
+    base: main
+```
 
 ### Watch a team live
 
@@ -189,6 +272,8 @@ concord  1795518603-enforce-463d82  1/12 finished  03:07 · running
   02:59  done      code-spans finished
 ```
 
+---
+
 ## First results (RQ1, CooperBench gold patches)
 
 On all **560** Python feature pairs of [CooperBench](https://github.com/cooperbench/CooperBench), Concord's textual merge results agree with CooperBench's own gold conflict report on 560/560 pairs. At symbol level:
@@ -198,6 +283,8 @@ On all **560** Python feature pairs of [CooperBench](https://github.com/cooperbe
 - Test runs confirmed that interference between *gold* patches is rare: 0 of 48 evaluable jinja pairs fail together. The value of Concord shows on *agent* patches (see the live results above).
 
 Details: [eval/rq1/results.md](eval/rq1/results.md).
+
+---
 
 ## Architecture
 
@@ -223,14 +310,14 @@ flowchart LR
 
 | Crate | Role | Status |
 |---|---|---|
-| [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, coherence protocol (leases, duplicate-symbol guard, negotiation, finish gate), pairwise conflict analysis, exhaustive BFS formal model checker | ✅ Complete |
-| [`concord-lang`](crates/concord-lang) | Tree-sitter & schema front-ends: symbols, normalised contracts, body digests, imports, reference resolution, affected-test graph | ✅ Python, TS/JS, Rust, Go, C/C++, Schemas |
-| [`concord-git`](crates/concord-git) | Git plumbing: tree reading, in-memory `merge-tree`, patience/diff3 verified insertion-union, worktree snapshots & listing | ✅ Complete |
-| [`concord-cli`](crates/concord-cli) | `concord` binary: `setup`, `plan`, `symbols`, `diff`, `analyze`, `worktrees`, `typecheck`, `merge`, `mrp`, `run`, `watch`, `mcp` (12 MCP tools + authenticated TCP daemon) | ✅ Complete |
+| [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, coherence protocol (leases, duplicate-symbol guard, negotiation, finish gate), pairwise conflict analysis, exhaustive BFS formal model checker | Complete |
+| [`concord-lang`](crates/concord-lang) | Tree-sitter & schema front-ends: symbols, normalised contracts, body digests, imports, reference resolution, HTTP route linking, affected-test graph | Python, TS/JS, Rust, Go, C/C++, Schemas |
+| [`concord-git`](crates/concord-git) | Git plumbing: tree reading, in-memory `merge-tree`, patience/diff3 verified insertion-union, worktree snapshots & listing | Complete |
+| [`concord-cli`](crates/concord-cli) | `concord` binary: `setup`, `plan`, `symbols`, `diff`, `analyze`, `worktrees`, `typecheck`, `merge`, `mrp`, `run`, `watch`, `mcp` (12 MCP tools + authenticated TCP daemon) | Complete |
 
 **Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), **Go** (`.go`), **C/C++** (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`), **schema/API contracts** (`.sql`, `.prisma`, `.proto`, OpenAPI `.json`/`.yaml`), and **cross-language HTTP routes** (FastAPI/Flask/Express/Next.js App Router ↔ `fetch`/`axios` calls). Files in other languages still participate in textual/structural merge checks and file-existence guards.
 
-Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech-stack.md](docs/tech-stack.md) · Related work: [docs/research/related-work.md](docs/research/related-work.md) · Evaluation plan: [eval/README.md](eval/README.md)
+Design: [docs/design.md](docs/design.md) · Tech stack: [docs/tech-stack.md](docs/tech-stack.md) · Related work: [docs/research/related-work.md](docs/research/related-work.md) · Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) · Security: [SECURITY.md](SECURITY.md)
 
 ## How it differs from existing tools
 
@@ -242,7 +329,7 @@ Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech
 | [Weave](https://github.com/Ataraxy-Labs/weave) / [Aura](https://github.com/Naridon-Inc/aura) | AST entities | declared MCP claims | no (same-file entity merge) | entity claim conflict |
 | [Claim Plane](https://github.com/SkeinRank/claim-plane) | declared intents/regions | declared by planner | partially | admission (96.7% serialised) |
 | [Gas Town](https://github.com/gastownhall/gastown) Refinery | merge queue | – | at merge time | no |
-| **Concord** | **symbols; contract vs. body + regions** | **inferred at run time** | **yes, live + post-merge** | **surgical notices + finish gate + MRP** |
+| **Concord** | **symbols; contract vs. body + regions** | **inferred at run time** | **yes, live + post-merge + HTTP/schema** | **surgical notices + finish gate + MRP** |
 
 ## License
 
