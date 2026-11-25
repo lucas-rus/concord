@@ -38,3 +38,9 @@ case ":$PATH:" in
   *":$DIR:"*) ;;
   *) echo "Note: $DIR is not on your PATH; add it, or use the full path in your MCP configuration." ;;
 esac
+if [ "${1:-}" = "--setup" ]; then
+  shift
+  "$DIR/concord" setup "$@"
+else
+  echo "Next: run '$DIR/concord setup' to connect OpenCode, Claude Code, or Cursor automatically."
+fi

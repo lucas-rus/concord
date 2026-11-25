@@ -65,26 +65,23 @@ Files are the wrong unit of coordination. Agents break each other through **cont
 
 Concord runs locally, next to your repository, as an [MCP](https://modelcontextprotocol.io) server. Your coding agent (OpenCode, Claude Code, any MCP client) gets tools to start a **team of parallel agents** on the repository, follow it, and fetch one integrated branch; you just ask it in plain language ("split this into parallel tickets and run them with Concord").
 
-**1. Install the binary** (macOS, Linux):
+**1. Install & auto-connect in one command** (macOS, Linux):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh   # to ~/.local/bin
-# or from source:
-cargo install --git https://github.com/lucas-rus/concord concord-cli
+curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh -s -- --setup
+# or install first, then run setup separately:
+curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/main/install.sh | sh
+concord setup   # auto-connects OpenCode, Claude Code, and Cursor
 ```
 
-**2. Connect it.**
+*(From source with Rust ≥ 1.90: `cargo install --git https://github.com/lucas-rus/concord concord-cli && concord setup`.)*
 
-OpenCode (`~/.config/opencode/opencode.jsonc`):
+**2. Or connect manually:**
 
-```jsonc
-"mcp": {
-  "concord": {
-    "type": "local",
-    "command": ["concord", "mcp", "--agent-cli", "opencode", "--model", "opencode/qwen4-max-free"],
-    "enabled": true
-  }
-}
+OpenCode (one-line CLI, no JSON editing):
+
+```bash
+opencode mcp add --global concord -- concord mcp --agent-cli opencode
 ```
 
 Claude Code (plugin with the MCP server and a `concord-team` skill):
@@ -94,9 +91,10 @@ Claude Code (plugin with the MCP server and a `concord-team` skill):
 /plugin install concord@lucas-rus-concord
 ```
 
-**MCP Tools (11):**
-- **Contract inspection & smart merging (for any agent workflow):**
-  - `concord_symbols` — list symbol signatures and line spans without function bodies (~10× fewer tokens than reading whole files)
+**MCP Tools (12):**
+- **Planning, contract inspection & smart merging (for any agent workflow):**
+  - `concord_plan` — partition the repository symbol graph into shared contract hubs and producer-first parallel ticket clusters
+  - `concord_symbols` — list symbol signatures and line spans without function bodies (~10× fewer tokens than reading whole files; Python, TS/JS, Rust, Go, SQL, Prisma, Protobuf, OpenAPI)
   - `concord_diff_contracts` — contract-level diff between revisions or working tree, with impacted callers
   - `concord_worktrees` — zero-mutation live check across all active `git worktree` checkouts (Claude Squad, Cursor worktrees, manual worktrees)
   - `concord_analyze` — check concurrent branches for cross-file contract violations, duplicate symbols, and textual overlaps

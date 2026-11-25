@@ -139,10 +139,26 @@ fn extract_sql(path: &str, source: &str) -> Vec<Symbol> {
                 let end_line = (end.min(lines.len().saturating_sub(1)) + 1) as u32;
                 let table_id = format!("db.{table_name}");
                 let mut col_summaries = Vec::new();
-                for (offset, line_text) in lines[i..=end.min(lines.len().saturating_sub(1))].iter().enumerate() {
-                    if offset == 0 {
-                        continue;
+                // Handle both multi-line and single-line `CREATE TABLE foo (a INT, b TEXT);`
+                let body_lines: Vec<(u32, String)> = if i == end {
+                    if let (Some(lp), Some(rp)) = (lines[i].find('('), lines[i].rfind(')'))
+                        && rp > lp + 1
+                    {
+                        lines[i][lp + 1..rp]
+                            .split(',')
+                            .map(|s| (start_line, s.trim().to_owned()))
+                            .collect()
+                    } else {
+                        Vec::new()
                     }
+                } else {
+                    lines[i + 1..=end.min(lines.len().saturating_sub(1))]
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, text)| ((i + offset + 2) as u32, (*text).to_owned()))
+                        .collect()
+                };
+                for (ln, line_text) in body_lines {
                     let col_raw = line_text.split("--").next().unwrap_or("").trim().trim_end_matches(',');
                     if col_raw.is_empty() || col_raw.starts_with(')') {
                         continue;
@@ -161,7 +177,6 @@ fn extract_sql(path: &str, source: &str) -> Vec<Symbol> {
                     if let Some((col_tok, rest)) = col_raw.split_once(char::is_whitespace) {
                         let col_name = strip_ident(col_tok);
                         if !col_name.is_empty() {
-                            let ln = (i + offset + 1) as u32;
                             let col_sig = format!("{col_name} {}", collapse_ws(rest));
                             col_summaries.push(col_sig.clone());
                             symbols.push(make_symbol(

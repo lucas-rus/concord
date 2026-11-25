@@ -131,6 +131,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Automatically connect Concord's MCP server to OpenCode, Claude Code, and Cursor.
+    Setup {
+        /// Target client: auto (default), opencode, claude, or cursor.
+        #[arg(long, default_value = "auto")]
+        client: String,
+        /// Optional default model passed to `concord mcp --model`.
+        #[arg(long)]
+        model: Option<String>,
+        /// Write project-local config instead of user global config.
+        #[arg(long)]
+        project: bool,
+    },
     /// Launch several AI coding agents in parallel worktrees, coordinate them
     /// live, integrate their work and run the tests.
     Run {
@@ -508,6 +520,18 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Command::Setup { client, model, project } => {
+            let target = client.parse()?;
+            let actions = concord_cli::setup::run_setup(&concord_cli::setup::SetupOptions {
+                client: target,
+                model,
+                project_local: project,
+                concord_exe: std::env::current_exe()?,
+            })?;
+            for a in actions {
+                println!("{a}");
+            }
+        }
         Command::Watch { dir, once, interval_ms } => {
             concord_cli::watch::watch(&dir, once, Duration::from_millis(interval_ms))?;
         }
