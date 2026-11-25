@@ -151,7 +151,10 @@ enum Command {
     Run {
         /// JSON file with `[{"name": "...", "prompt": "..."}, ...]`.
         #[arg(long)]
-        tasks: PathBuf,
+        tasks: Option<PathBuf>,
+        /// JSON file with sequential waves of parallel tasks: `[{"name": "wave-1", "tasks": [...]}, ...]`.
+        #[arg(long)]
+        milestones: Option<PathBuf>,
         #[arg(long, default_value = ".")]
         repo: PathBuf,
         #[arg(long, default_value = "HEAD")]
@@ -423,6 +426,7 @@ fn main() -> Result<()> {
         }
         Command::Run {
             tasks,
+            milestones,
             repo,
             base,
             model,
@@ -449,40 +453,77 @@ fn main() -> Result<()> {
             agent_cli,
             opencode,
         } => {
-            let tasks: Vec<Task> = serde_json::from_str(&std::fs::read_to_string(&tasks)?)?;
+            #[derive(serde::Deserialize)]
+            struct MilestoneWave {
+                name: String,
+                tasks: Vec<Task>,
+                #[serde(default)]
+                test_cmd: Option<String>,
+            }
             let repo_root = Repo::open(&repo)?.root().to_path_buf();
-            let cfg = RunConfig {
-                out_dir: out.unwrap_or_else(|| repo_root.join(".concord").join("runs")),
-                repo: repo_root,
-                base,
-                tasks,
-                model,
-                mode,
-                budget_usd,
-                test_cmd,
-                allowed_tools: allow,
-                max_wait: Duration::from_secs(max_wait_secs),
-                peer_merge,
-                contracts: !no_contracts,
-                regions,
-                file_leases,
-                overlap_warnings,
-                all_contracts,
-                deliver_notices: !no_notices,
-                enforce_gate: !no_gate,
-                publish_debounce: Duration::from_millis(publish_debounce_ms),
-                speculative_secs,
-                fails_together,
-                merge_driver,
-                resume_rounds,
-                claude,
-                agent_cli,
-                opencode,
-                concord_exe: std::env::current_exe()?,
+            let base_out = out.unwrap_or_else(|| repo_root.join(".concord").join("runs"));
+            let concord_exe = std::env::current_exe()?;
+            let waves: Vec<MilestoneWave> = match (tasks, milestones) {
+                (Some(tpath), None) => vec![MilestoneWave {
+                    name: String::new(),
+                    tasks: serde_json::from_str(&std::fs::read_to_string(&tpath)?)?,
+                    test_cmd: None,
+                }],
+                (None, Some(mpath)) => serde_json::from_str(&std::fs::read_to_string(&mpath)?)?,
+                (Some(_), Some(_)) => bail!("pass either --tasks or --milestones, not both"),
+                (None, None) => bail!("pass --tasks <file.json> or --milestones <file.json>"),
             };
-            let r = run::run(&cfg)?;
-            print!("{}", run::render(&r));
-            eprintln!("run directory: {}", r.run_dir.display());
+            let mut cur_base = base;
+            for (idx, wave) in waves.into_iter().enumerate() {
+                let wave_out = if wave.name.is_empty() {
+                    base_out.clone()
+                } else {
+                    base_out.join(format!("{:02}-{}", idx + 1, wave.name))
+                };
+                if !wave.name.is_empty() {
+                    eprintln!("=== Milestone wave {}: {} (base: {}) ===", idx + 1, wave.name, cur_base);
+                }
+                let cfg = RunConfig {
+                    out_dir: wave_out,
+                    repo: repo_root.clone(),
+                    base: cur_base.clone(),
+                    tasks: wave.tasks,
+                    model: model.clone(),
+                    mode,
+                    budget_usd,
+                    test_cmd: wave.test_cmd.unwrap_or_else(|| test_cmd.clone()),
+                    allowed_tools: allow.clone(),
+                    max_wait: Duration::from_secs(max_wait_secs),
+                    peer_merge,
+                    contracts: !no_contracts,
+                    regions,
+                    file_leases,
+                    overlap_warnings,
+                    all_contracts,
+                    deliver_notices: !no_notices,
+                    enforce_gate: !no_gate,
+                    publish_debounce: Duration::from_millis(publish_debounce_ms),
+                    speculative_secs,
+                    fails_together,
+                    merge_driver: merge_driver.clone(),
+                    resume_rounds,
+                    claude: claude.clone(),
+                    agent_cli,
+                    opencode: opencode.clone(),
+                    concord_exe: concord_exe.clone(),
+                };
+                let r = run::run(&cfg)?;
+                print!("{}", run::render(&r));
+                eprintln!("run directory: {}", r.run_dir.display());
+                if !r.integration.conflicts.is_empty() {
+                    bail!(
+                        "wave {} ended with {} merge conflict(s); stopping before next wave",
+                        idx + 1,
+                        r.integration.conflicts.len()
+                    );
+                }
+                cur_base = format!("concord/{}/integration", r.run_id);
+            }
         }
         Command::Mcp { agent_cli, model } => {
             concord_cli::mcp::serve(concord_cli::mcp::McpConfig {

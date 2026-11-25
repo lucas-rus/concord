@@ -159,6 +159,7 @@ concord merge --base main b1 b2 --type-check    # contract-ordered smart merge +
 concord mrp .concord/runs/<run-id>              # render SASE Merge-Readiness Pack (markdown or --json)
 concord analyze --base main b1 b2 --json        # machine-readable output (for CI & experiments)
 concord run --tasks tasks.json --mode enforce --regions --test-cmd "npm test"
+concord run --milestones waves.json --mode enforce --regions --test-cmd "npm test"
 ```
 
 > **Zero-config acceptance gating:** `tasks.json` only needs `[{"name": "...", "prompt": "..."}]` — when per-ticket `check` commands are omitted, Concord automatically uses `--test-cmd` for finish-gate verification, cross-agent regression gating, and $O(\log k)$ post-merge failure bisection.
@@ -227,7 +228,7 @@ flowchart LR
 | [`concord-git`](crates/concord-git) | Git plumbing: tree reading, in-memory `merge-tree`, patience/diff3 verified insertion-union, worktree snapshots & listing | ✅ Complete |
 | [`concord-cli`](crates/concord-cli) | `concord` binary: `setup`, `plan`, `symbols`, `diff`, `analyze`, `worktrees`, `typecheck`, `merge`, `mrp`, `run`, `watch`, `mcp` (12 MCP tools + authenticated TCP daemon) | ✅ Complete |
 
-**Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), **Go** (`.go`), **C/C++** (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`), and **schema/API contracts** (`.sql`, `.prisma`, `.proto`, OpenAPI `.json`/`.yaml`). Files in other languages still participate in textual/structural merge checks and file-existence guards.
+**Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), **Go** (`.go`), **C/C++** (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`), **schema/API contracts** (`.sql`, `.prisma`, `.proto`, OpenAPI `.json`/`.yaml`), and **cross-language HTTP routes** (FastAPI/Flask/Express/Next.js App Router ↔ `fetch`/`axios` calls). Files in other languages still participate in textual/structural merge checks and file-existence guards.
 
 Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech-stack.md](docs/tech-stack.md) · Related work: [docs/research/related-work.md](docs/research/related-work.md) · Evaluation plan: [eval/README.md](eval/README.md)
 

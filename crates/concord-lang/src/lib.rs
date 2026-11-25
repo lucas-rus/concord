@@ -9,6 +9,7 @@
 pub mod cpp_lang;
 pub mod go_lang;
 pub mod python;
+pub mod routes;
 pub mod rust_lang;
 pub mod schema;
 pub mod typescript;
@@ -98,7 +99,7 @@ pub fn is_test_path(path: &str) -> bool {
 
 /// Index a file if its language is supported.
 pub fn index_file(path: &str, source: &str) -> Option<Result<FileIndex, LangError>> {
-    if python::is_python_path(path) {
+    let mut res = if python::is_python_path(path) {
         Some(python::index_file(path, source))
     } else if typescript::is_typescript_path(path) {
         Some(typescript::index_file(path, source))
@@ -112,7 +113,11 @@ pub fn index_file(path: &str, source: &str) -> Option<Result<FileIndex, LangErro
         Some(schema::index_file(path, source))
     } else {
         None
+    };
+    if let Some(Ok(ref mut fi)) = res {
+        routes::enrich_http_contracts(fi, source);
     }
+    res
 }
 
 /// A repository-wide index used to resolve references to symbols.
@@ -230,6 +235,14 @@ impl RepoIndex {
     pub fn resolve(&self, file: &FileIndex, r: &RawRef) -> Option<SymbolId> {
         let head = r.chain.first()?;
         let rest = &r.chain[1..];
+
+        // Direct cross-language HTTP route reference (`http.<METHOD>.<path>`).
+        if rest.is_empty() && head.starts_with("http.") {
+            let sym = SymbolId::new(head);
+            if self.by_id.contains_key(&sym) {
+                return Some(sym);
+            }
+        }
 
         let is_py = python::is_python_path(&file.path);
         let is_ts = typescript::is_typescript_path(&file.path);
