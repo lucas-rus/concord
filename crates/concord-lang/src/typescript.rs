@@ -76,8 +76,12 @@ fn strip_extension(p: &str) -> &str {
 
 /// Module targeted by an import specifier written in `importer` (a
 /// repository-relative path): relative specifiers are resolved against the
-/// importing file, anything else is external (`extern:react`).
+/// importing file, `@/...` and `~/...` tsconfig root aliases resolve into the
+/// repository, and package specifiers are external (`extern:react`).
 pub fn resolve_specifier(importer: &str, spec: &str) -> String {
+    if let Some(rest) = spec.strip_prefix("@/").or_else(|| spec.strip_prefix("~/")) {
+        return module_name(rest);
+    }
     if !(spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../")) {
         return format!("{EXTERNAL_PREFIX}{spec}");
     }
@@ -1478,6 +1482,12 @@ mod tests {
         assert_eq!(resolve_specifier("src/auth/reset.ts", "./tokens.js"), "src.auth.tokens");
         assert_eq!(resolve_specifier("src/auth/reset.ts", "."), "src.auth");
         assert_eq!(resolve_specifier("src/auth/reset.ts", "react"), "extern:react");
+        assert_eq!(
+            resolve_specifier("src/auth/reset.ts", "@scope/pkg"),
+            "extern:@scope/pkg"
+        );
+        assert_eq!(resolve_specifier("app/api/route.ts", "@/lib/matching"), "lib.matching");
+        assert_eq!(resolve_specifier("app/api/route.ts", "~/lib/types"), "lib.types");
         assert_eq!(resolve_specifier("a.ts", "../../x"), "extern:../../x");
         assert!(is_typescript_path("a/b.tsx"));
         assert!(is_typescript_path("a/b.cjs"));

@@ -1,17 +1,25 @@
 //! `concord mcp`: Concord as an MCP server (JSON-RPC 2.0 over stdio).
 //!
-//! Connect it to any MCP client (OpenCode, Claude Code, ...). The client's
-//! agent can then start a team of parallel agents on the current repository,
-//! follow their progress, and fetch the integrated result, without the user
-//! running anything in a terminal.
-//!
-//! A run started with `concord_run` is a detached `concord run` process.
-//! Its files live under `<repo>/.concord/mcp/<id>/`, which is excluded from
-//! git through `.git/info/exclude`.
+//! Connect it to any MCP client (OpenCode, Claude Code, Cursor, Antigravity, ...).
+//! Exposes both:
+//! - **Team orchestration tools** (`concord_run`, `concord_status`, `concord_result`,
+//!   `concord_cancel`), and
+//! - **Direct contract-level merge & inspection tools** (`concord_symbols`,
+//!   `concord_diff_contracts`, `concord_analyze`, `concord_worktrees`,
+//!   `concord_smart_merge`, `concord_negotiate`, `concord_ack`) so any AI agent
+//!   can inspect contracts instead of whole files and merge branches safely at
+//!   the symbol/contract level.
 
+use crate::mrp::{
+    SmartMergeConfig, analyze_worktrees, render_mrp_markdown, render_smart_merge, render_worktrees, smart_merge,
+};
+use crate::{analyze_branches, footprint_and_index, index_revision, report, simulate};
 use anyhow::{Context, Result, bail};
+use concord_core::ChangeKind;
 use concord_git::Repo;
+use concord_lang::RepoIndex;
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -29,63 +37,142 @@ const PROTOCOL: &str = "2025-06-18";
 fn tools() -> Value {
     json!([
         {
+            "name": "concord_symbols",
+            "description": "List symbol contracts (functions, methods, classes/structs/traits/interfaces, types, module constants) with line spans and signatures—without function bodies. Supports Python, TypeScript/JS, Rust, and Go. Use this instead of reading whole files when checking APIs before editing or merging.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Files or directories relative to repository root (default: all indexed source files at HEAD)."
+                    },
+                    "json": { "type": "boolean", "description": "Return structured JSON instead of compact text." }
+                }
+            }
+        },
+        {
+            "name": "concord_diff_contracts",
+            "description": "Compare two git revisions (or base vs working tree) at symbol/contract level rather than raw line diffs. Classifies each symbol change as breaking contract, compatible contract, body-only, added, removed, or renamed, and lists repository call sites impacted by breaking changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "base": { "type": "string", "description": "Base git revision (default: HEAD~1, or HEAD when working_tree=true)." },
+                    "head": { "type": "string", "description": "Target git revision (default: HEAD)." },
+                    "working_tree": { "type": "boolean", "description": "Snapshot uncommitted working-tree changes as `head`." }
+                }
+            }
+        },
+        {
+            "name": "concord_analyze",
+            "description": "Check concurrent git branches against a common base for cross-file contract violations, duplicate symbol definitions, symbol/file overlaps, and textual conflicts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "branches": { "type": "array", "items": { "type": "string" }, "description": "Two or more branch or commit refs." },
+                    "base": { "type": "string", "description": "Common base revision (default: main, falling back to merge-base)." }
+                },
+                "required": ["branches"]
+            }
+        },
+        {
+            "name": "concord_worktrees",
+            "description": "Inspect all active `git worktree` checkouts in this repository (including uncommitted edits) in memory without touching git state. Reports cross-worktree contract breaks, duplicate symbol definitions, textual overlaps, and auto-unionable insertions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "base": { "type": "string", "description": "Common base revision (default: HEAD)." },
+                    "include_clean": { "type": "boolean", "description": "Include worktrees with zero changes relative to base." }
+                }
+            }
+        },
+        {
+            "name": "concord_smart_merge",
+            "description": "Merge branches in contract-dependency order (producers before consumers), automatically resolving verified pure two-sided insertions, checking post-merge AST call-site conformance, and optionally running tests with binary failure bisection.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "branches": { "type": "array", "items": { "type": "string" }, "description": "Branches to integrate." },
+                    "base": { "type": "string", "description": "Base revision to start integration from (default: HEAD)." },
+                    "into_branch": { "type": "string", "description": "Optional branch name to create/update when merge is clean." },
+                    "test_cmd": { "type": "string", "description": "Optional shell command to verify integrated code (bisects culprit branch on failure)." },
+                    "merge_driver": { "type": "string", "description": "Optional external structured merge binary (e.g. 'mergiraf')." }
+                },
+                "required": ["branches"]
+            }
+        },
+        {
+            "name": "concord_negotiate",
+            "description": "Propose a signature/contract change on a symbol currently leased or defined by another live Concord agent. Routes a structured negotiation notice to that symbol's owner.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Qualified symbol id, e.g. 'notify.email.send_email'." },
+                    "proposal": { "type": "string", "description": "Proposed signature and rationale." },
+                    "agent": { "type": "string", "description": "Sender agent id (defaults to $CONCORD_AGENT)." },
+                    "addr": { "type": "string", "description": "Daemon TCP address (defaults to $CONCORD_DAEMON_ADDR or active run)." }
+                },
+                "required": ["symbol", "proposal"]
+            }
+        },
+        {
+            "name": "concord_ack",
+            "description": "Explicitly acknowledge a peer's published contract change on `symbol` after verifying that your call sites conform.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Qualified symbol id to acknowledge." },
+                    "agent": { "type": "string", "description": "Agent id (defaults to $CONCORD_AGENT)." },
+                    "addr": { "type": "string", "description": "Daemon TCP address (defaults to $CONCORD_DAEMON_ADDR or active run)." }
+                },
+                "required": ["symbol"]
+            }
+        },
+        {
             "name": "concord_run",
-            "description": "Start a team of AI coding agents that work IN PARALLEL on this git repository, coordinated by \
-    Concord. Each task gets its own agent and git worktree. While they work, Concord tells an agent when another agent \
-    changes a function signature it depends on, and when an agent finishes it merges finished teammates' overlapping work \
-    into its worktree so the conflict is resolved by the agent. At the end all branches are merged into one integration \
-    branch and the test command runs on it. Returns immediately with a run id; use concord_status to follow it. \
-    Write each task as a self-contained ticket (what to build, where, which API), one feature per task; tasks may touch \
-    the same code. The repository must be committed (uncommitted changes are not seen by the agents).",
+            "description": "Start a team of AI coding agents working IN PARALLEL in isolated git worktrees coordinated live by Concord. Default coordination ('regions') combines contract coherence + region coherence + verified insertion union so agents never fight over git conflict markers. Returns immediately with `run_id`; monitor with `concord_status` and retrieve integrated branch + Merge-Readiness Pack with `concord_result`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tasks": {
                         "type": "array",
-                        "description": "One entry per agent.",
+                        "description": "One self-contained ticket per parallel agent.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": { "type": "string", "description": "Short identifier, e.g. 'auth' (letters, digits, '-', '_')." },
-                                "prompt": { "type": "string", "description": "The ticket for this agent." }
+                                "name": { "type": "string", "description": "Short identifier (letters, digits, '-', '_')." },
+                                "prompt": { "type": "string", "description": "Self-contained feature specification." },
+                                "check": { "type": "string", "description": "Optional per-ticket acceptance test command." }
                             },
                             "required": ["name", "prompt"]
                         }
                     },
-                    "test_cmd": { "type": "string", "description": "Shell command that tests the integrated result (run in the repository root), e.g. 'python -m pytest -q'." },
-                    "base": { "type": "string", "description": "Revision the agents start from (default HEAD)." },
-                    "model": { "type": "string", "description": "Model for the agents (default from the server configuration)." },
-                    "coordination": { "type": "string", "enum": ["full", "regions", "contracts", "peer-merge", "off"], "description": "full (default): contract notices + finish gate + peer merge; regions: contract notices + region coherence (agents never receive each other's conflicts; overlapping edits are moved or handed off, insertions at the same place are combined); off: plain parallel agents (baseline)." },
-                    "fails_together": { "type": "boolean", "description": "Before an agent may finish, run test_cmd on its work merged with the finished agents' work, and block on tests that pass alone but fail together (needs test_cmd)." }
+                    "test_cmd": { "type": "string", "description": "Shell command testing integrated output (e.g. 'pytest -q' or 'cargo test')." },
+                    "base": { "type": "string", "description": "Starting git revision (default: HEAD)." },
+                    "model": { "type": "string", "description": "Override agent model." },
+                    "coordination": {
+                        "type": "string",
+                        "enum": ["regions", "full", "contracts", "peer-merge", "file-leases", "overlap-warnings", "off"],
+                        "description": "regions (default, recommended): contract coherence + region coherence + verified insertion union; full: contract coherence + peer merge; contracts: contract layer only; file-leases: exclusive whole-file locks; overlap-warnings: passive overlap alerts; off: uncoordinated baseline."
+                    },
+                    "fails_together": { "type": "boolean", "description": "Run fails-together semantic verification with peer bisection at finish gate (requires test_cmd)." }
                 },
                 "required": ["tasks"]
             }
         },
         {
             "name": "concord_status",
-            "description": "Progress of a Concord run (agents, notices, finish-gate blocks, merges), or the final report if it has finished. Without run_id, lists the runs of this repository.",
+            "description": "Progress of a Concord run (per-agent edits, notices, gate blocks, merges), or list repository runs when `run_id` is omitted.",
             "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string" } } }
         },
         {
             "name": "concord_result",
-            "description": "Final report of a finished Concord run: per-agent summary, merge conflicts, test result, and the integration branch that contains all agents' merged work (merge it with `git merge <branch>`).",
+            "description": "Final report and SASE Merge-Readiness Pack (MRP) of a finished Concord run, including the integrated git branch name.",
             "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string" } }, "required": ["run_id"] }
         },
         {
-            "name": "concord_analyze",
-            "description": "Check existing branches (e.g. from parallel agents or pull requests) against a base for textual merge conflicts and for contract problems a clean merge would hide: changed or removed functions whose callers on other branches no longer match. Does not run agents.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "branches": { "type": "array", "items": { "type": "string" } },
-                    "base": { "type": "string", "description": "Default: main" }
-                },
-                "required": ["branches"]
-            }
-        },
-        {
             "name": "concord_cancel",
-            "description": "Stop a running Concord run.",
+            "description": "Stop a running Concord team.",
             "inputSchema": { "type": "object", "properties": { "run_id": { "type": "string" } }, "required": ["run_id"] }
         }
     ])
@@ -118,7 +205,7 @@ pub fn serve(cfg: McpConfig) -> Result<()> {
                     "protocolVersion": version,
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "concord", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Concord coordinates teams of parallel coding agents on this repository. Use concord_run to split a larger piece of work into parallel tasks, concord_status to follow it, and concord_result to get the integrated branch."
+                    "instructions": "Concord coordinates and merges parallel coding work at the symbol/contract level (Python, TypeScript/JS, Rust, Go). Use concord_symbols and concord_diff_contracts to inspect APIs concisely, concord_worktrees or concord_analyze to detect cross-branch contract breaks, concord_smart_merge to merge branches safely, or concord_run to launch coordinated parallel agents."
                 }})
             }
             "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
@@ -126,7 +213,8 @@ pub fn serve(cfg: McpConfig) -> Result<()> {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let (text, is_error) = match call(&cfg, name, &args) {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let (text, is_error) = match dispatch(&cfg, &cwd, name, &args) {
                     Ok(t) => (t, false),
                     Err(e) => (format!("{e:#}"), true),
                 };
@@ -145,17 +233,24 @@ pub fn serve(cfg: McpConfig) -> Result<()> {
     Ok(())
 }
 
-fn call(cfg: &McpConfig, name: &str, args: &Value) -> Result<String> {
-    let repo = Repo::open(&std::env::current_dir()?).context("Concord needs to run inside a git repository")?;
+/// Dispatch a single MCP tool call rooted at `cwd` (public for integration tests).
+pub fn dispatch(cfg: &McpConfig, cwd: &Path, name: &str, args: &Value) -> Result<String> {
+    let repo = Repo::open(cwd).context("Concord needs to run inside a git repository")?;
     let root = repo.root().to_path_buf();
     match name {
+        "concord_symbols" => tool_symbols(&repo, &root, args),
+        "concord_diff_contracts" => tool_diff_contracts(&repo, &root, args),
+        "concord_analyze" => tool_analyze(&repo, args),
+        "concord_worktrees" => tool_worktrees(&repo, args),
+        "concord_smart_merge" => tool_smart_merge(&root, args),
+        "concord_negotiate" => tool_ipc(&root, "Negotiate", args),
+        "concord_ack" => tool_ipc(&root, "Ack", args),
         "concord_run" => start_run(cfg, &repo, &root, args),
         "concord_status" => match args.get("run_id").and_then(Value::as_str) {
             Some(id) => status(&root, id),
             None => list_runs(&root),
         },
         "concord_result" => result(&root, arg(args, "run_id")?),
-        "concord_analyze" => analyze(cfg, &root, args),
         "concord_cancel" => cancel(&root, arg(args, "run_id")?),
         _ => bail!("unknown tool {name}"),
     }
@@ -165,6 +260,251 @@ fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .with_context(|| format!("missing argument `{key}`"))
+}
+
+fn tool_symbols(repo: &Repo, root: &Path, args: &Value) -> Result<String> {
+    let want_json = args.get("json").and_then(Value::as_bool).unwrap_or(false);
+    let paths: Vec<String> = args
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if paths.is_empty() {
+        let head = repo.rev_parse("HEAD")?;
+        for rel in repo.list_files(&head)? {
+            if concord_lang::is_supported_path(&rel) {
+                targets.push(root.join(rel));
+            }
+        }
+    } else {
+        for p in &paths {
+            collect_source_files(&root.join(p), &mut targets);
+        }
+    }
+
+    let mut indices = Vec::new();
+    let mut text = String::new();
+    for abs in targets {
+        let Ok(src) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        let rel = abs
+            .strip_prefix(root)
+            .unwrap_or(&abs)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some(Ok(idx)) = concord_lang::index_file(&rel, &src) {
+            if want_json {
+                indices.push(idx);
+            } else if !idx.symbols.is_empty() {
+                text.push_str(&report::symbols(&idx.path, &idx.symbols));
+            }
+        }
+    }
+    if want_json {
+        Ok(serde_json::to_string_pretty(&indices)?)
+    } else if text.is_empty() {
+        Ok("No supported symbols found in the requested paths.".into())
+    } else {
+        Ok(text)
+    }
+}
+
+fn collect_source_files(path: &Path, out: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        out.push(path.to_path_buf());
+    } else if path.is_dir()
+        && let Ok(rd) = std::fs::read_dir(path)
+    {
+        let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|x| x.path())).collect();
+        entries.sort();
+        for p in entries {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.starts_with('.') || matches!(name, "node_modules" | "target" | "vendor" | "__pycache__") {
+                continue;
+            }
+            if p.is_dir() {
+                collect_source_files(&p, out);
+            } else if concord_lang::is_supported_path(&p.to_string_lossy()) {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn tool_diff_contracts(repo: &Repo, root: &Path, args: &Value) -> Result<String> {
+    let working_tree = args.get("working_tree").and_then(Value::as_bool).unwrap_or(false);
+    let base_arg = args
+        .get("base")
+        .and_then(Value::as_str)
+        .unwrap_or(if working_tree { "HEAD" } else { "HEAD~1" });
+    let base_commit = repo
+        .rev_parse(base_arg)
+        .or_else(|_| repo.rev_parse("HEAD"))
+        .context("cannot resolve base revision")?;
+    let head_commit = if working_tree {
+        Repo::snapshot_worktree(root)?
+    } else {
+        let h = args.get("head").and_then(Value::as_str).unwrap_or("HEAD");
+        repo.rev_parse(h)?
+    };
+
+    let mut warnings = Vec::new();
+    let base_files = index_revision(repo, &base_commit, &mut warnings)?;
+    let base_index = RepoIndex::new(base_files.values().cloned());
+    let (fp, head_index) = footprint_and_index(
+        repo,
+        &base_commit,
+        &head_commit,
+        &base_files,
+        &base_index,
+        &mut warnings,
+    )?;
+
+    if fp.changes.is_empty() {
+        return Ok(format!(
+            "No symbol changes between {} and {}.",
+            &base_commit[..base_commit.len().min(10)],
+            &head_commit[..head_commit.len().min(10)]
+        ));
+    }
+
+    let mut out = format!(
+        "Contract diff {} -> {} ({} files, {} symbol changes):\n",
+        &base_commit[..base_commit.len().min(10)],
+        &head_commit[..head_commit.len().min(10)],
+        fp.changed_files.len(),
+        fp.changes.len()
+    );
+    let all_syms: std::collections::BTreeSet<_> = head_index.symbols().map(|s| s.id.clone()).collect();
+    let all_files: std::collections::BTreeSet<_> = head_index.files().map(|f| f.path.clone()).collect();
+    let repo_uses = head_index.uses_from(&all_syms, &all_files);
+
+    for c in &fp.changes {
+        let tag = match &c.kind {
+            ChangeKind::ContractChanged if c.is_breaking() => "BREAKING_CONTRACT",
+            ChangeKind::ContractChanged => "COMPAT_CONTRACT  ",
+            ChangeKind::Added => "ADDED            ",
+            ChangeKind::Removed => "REMOVED          ",
+            ChangeKind::Renamed { .. } => "RENAMED          ",
+            ChangeKind::BodyChanged => "BODY_ONLY        ",
+        };
+        let _ = writeln!(out, "  {tag} {} ({})", c.symbol, c.path);
+        if c.is_contract_change() {
+            if let Some(b) = &c.before {
+                let _ = writeln!(out, "    before: {}", b.display);
+            }
+            if let Some(a) = &c.after {
+                let _ = writeln!(out, "    after : {}", a.display);
+            }
+            if c.is_breaking()
+                && let Some(sites) = repo_uses.get(&c.symbol)
+            {
+                for u in sites.iter().take(10) {
+                    let _ = writeln!(out, "    caller: {}:{}  {}", u.path, u.line, u.text);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn tool_analyze(repo: &Repo, args: &Value) -> Result<String> {
+    let branches: Vec<String> = args
+        .get("branches")
+        .and_then(Value::as_array)
+        .context("`branches` must be a list")?
+        .iter()
+        .filter_map(|b| b.as_str().map(str::to_owned))
+        .collect();
+    if branches.len() < 2 {
+        bail!("provide at least two branches to compare");
+    }
+    let base = match args.get("base").and_then(Value::as_str) {
+        Some(b) => b.to_owned(),
+        None => repo
+            .rev_parse("main")
+            .or_else(|_| repo.merge_base(&branches[0], &branches[1]))
+            .unwrap_or_else(|_| "HEAD".into()),
+    };
+    let analysis = analyze_branches(repo, &base, &branches, true)?;
+    let sim = simulate(&analysis.branches);
+    Ok(report::analysis(&analysis, Some(&sim)))
+}
+
+fn tool_worktrees(repo: &Repo, args: &Value) -> Result<String> {
+    let base = args.get("base").and_then(Value::as_str).unwrap_or("HEAD");
+    let include_clean = args.get("include_clean").and_then(Value::as_bool).unwrap_or(false);
+    let wt = analyze_worktrees(repo, base, include_clean)?;
+    Ok(render_worktrees(&wt))
+}
+
+fn tool_smart_merge(root: &Path, args: &Value) -> Result<String> {
+    let branches: Vec<String> = args
+        .get("branches")
+        .and_then(Value::as_array)
+        .context("`branches` must be a list")?
+        .iter()
+        .filter_map(|b| b.as_str().map(str::to_owned))
+        .collect();
+    let base = args.get("base").and_then(Value::as_str).unwrap_or("HEAD").to_owned();
+    let into_branch = args.get("into_branch").and_then(Value::as_str).map(str::to_owned);
+    let test_cmd = args.get("test_cmd").and_then(Value::as_str).map(str::to_owned);
+    let merge_driver = args.get("merge_driver").and_then(Value::as_str).map(str::to_owned);
+    let rep = smart_merge(&SmartMergeConfig {
+        repo: root.to_path_buf(),
+        base,
+        branches,
+        into_branch,
+        test_cmd,
+        merge_driver,
+    })?;
+    Ok(render_smart_merge(&rep))
+}
+
+fn discover_daemon_addr(root: &Path) -> Option<String> {
+    if let Ok(a) = std::env::var("CONCORD_DAEMON_ADDR")
+        && !a.trim().is_empty()
+    {
+        return Some(a.trim().to_owned());
+    }
+    for sub in ["runs", "mcp"] {
+        let d = root.join(".concord").join(sub);
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if let Ok(addr) = std::fs::read_to_string(p.join("daemon.addr")) {
+                    return Some(addr.trim().to_owned());
+                }
+                if let Some(inner) = inner_run_dir(&p)
+                    && let Ok(addr) = std::fs::read_to_string(inner.join("daemon.addr"))
+                {
+                    return Some(addr.trim().to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn tool_ipc(root: &Path, event: &str, args: &Value) -> Result<String> {
+    let agent = args
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("CONCORD_AGENT").ok())
+        .filter(|s| !s.is_empty())
+        .context("provide `agent` or set $CONCORD_AGENT")?;
+    let addr = args
+        .get("addr")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| discover_daemon_addr(root))
+        .context("no active Concord daemon found (provide `addr` or run inside `concord run`)")?;
+    let resp = crate::live::daemon_request(&addr, &agent, event, args)?;
+    Ok(serde_json::to_string_pretty(&resp)?)
 }
 
 fn mcp_dir(root: &Path) -> PathBuf {
@@ -249,7 +589,7 @@ fn start_run(cfg: &McpConfig, repo: &Repo, root: &Path, args: &Value) -> Result<
         .and_then(Value::as_str)
         .unwrap_or(&cfg.model)
         .to_owned();
-    let coordination = args.get("coordination").and_then(Value::as_str).unwrap_or("full");
+    let coordination = args.get("coordination").and_then(Value::as_str).unwrap_or("regions");
     let mut cmd_args: Vec<String> = vec![
         "run".into(),
         "--repo".into(),
@@ -266,10 +606,13 @@ fn start_run(cfg: &McpConfig, repo: &Repo, root: &Path, args: &Value) -> Result<
         model.clone(),
     ];
     match coordination {
+        "regions" => cmd_args.extend(["--mode", "enforce", "--regions"].map(String::from)),
         "full" => cmd_args.extend(["--mode", "enforce", "--peer-merge"].map(String::from)),
         "contracts" => cmd_args.extend(["--mode", "enforce"].map(String::from)),
-        "regions" => cmd_args.extend(["--mode", "enforce", "--regions"].map(String::from)),
         "peer-merge" => cmd_args.extend(["--mode", "enforce", "--peer-merge", "--no-contracts"].map(String::from)),
+        "file-leases" => cmd_args.extend(["--mode", "enforce", "--file-leases", "--no-contracts"].map(String::from)),
+        "overlap-warnings" => cmd_args
+            .extend(["--mode", "enforce", "--overlap-warnings", "--no-contracts", "--no-gate"].map(String::from)),
         "off" => cmd_args.extend(["--mode", "off"].map(String::from)),
         other => bail!("unknown coordination {other:?}"),
     }
@@ -368,7 +711,7 @@ fn status(root: &Path, id: &str) -> Result<String> {
             "footprint" => c[0] += 1,
             "deliver" => c[1] += 1,
             "stop" if d.get("decision").and_then(Value::as_str) == Some("block") => c[2] += 1,
-            "merge" | "peer_merge" => c[3] += 1,
+            "merge" | "peer_merge" | "region_handoff" => c[3] += 1,
             "finished" => c[4] = 1,
             _ => {}
         }
@@ -408,8 +751,13 @@ fn result(root: &Path, id: &str) -> Result<String> {
     let rep: Value = serde_json::from_str(&std::fs::read_to_string(inner.join("report.json"))?)?;
     let run_id = rep.get("run_id").and_then(Value::as_str).unwrap_or("");
     let branch = format!("concord/{run_id}/integration");
+    let mrp_section = std::fs::read_to_string(inner.join("mrp.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<crate::mrp::MergeReadinessPack>(&s).ok())
+        .map(|mrp| format!("\n\n---\n\n{}", render_mrp_markdown(&mrp)))
+        .unwrap_or_default();
     Ok(format!(
-        "{report}\n\nAll agents' merged work is on branch `{branch}` (per-agent branches: `concord/{run_id}/<agent>`). \
+        "{report}{mrp_section}\n\nAll agents' merged work is on branch `{branch}` (per-agent branches: `concord/{run_id}/<agent>`). \
          Review it, then merge it into your branch with `git merge {branch}`."
     ))
 }
@@ -448,36 +796,9 @@ fn list_runs(root: &Path) -> Result<String> {
     ))
 }
 
-fn analyze(cfg: &McpConfig, root: &Path, args: &Value) -> Result<String> {
-    let branches: Vec<String> = args
-        .get("branches")
-        .and_then(Value::as_array)
-        .context("`branches` must be a list")?
-        .iter()
-        .filter_map(|b| b.as_str().map(str::to_owned))
-        .collect();
-    let base = args.get("base").and_then(Value::as_str).unwrap_or("main");
-    let out = Command::new(&cfg.concord_exe)
-        .current_dir(root)
-        .arg("analyze")
-        .arg("--repo")
-        .arg(root)
-        .args(["--base", base])
-        .args(&branches)
-        .arg("--notices")
-        .output()
-        .context("running concord analyze")?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.status.success() {
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-    }
-    Ok(text)
-}
-
 fn cancel(root: &Path, id: &str) -> Result<String> {
     let dir = run_dir(root, id)?;
     let pid = std::fs::read_to_string(dir.join("pid"))?.trim().to_owned();
-    // The run is its own process group: stop it and the agents it started.
     let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).status();
     Ok(format!("Sent stop signal to run `{id}`."))
 }

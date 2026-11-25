@@ -1,10 +1,10 @@
 //! The live coordination daemon.
 //!
-//! Agents (Claude Code sessions) report every tool call through hooks
-//! (`concord hook`), which forward the hook input to this daemon over a local
-//! TCP connection. The daemon keeps each agent's symbol footprint up to date,
-//! runs the coherence protocol, delivers notices through `additionalContext`,
-//! and enforces the finish gate in the `Stop` hook.
+//! Agents (Claude Code or OpenCode sessions) report every tool call through
+//! hooks (`concord hook`), which forward the hook input to this daemon over a
+//! local TCP connection. The daemon keeps each agent's symbol footprint up to
+//! date, runs the coherence protocol, delivers notices through
+//! `additionalContext`, and enforces the finish gate in the `Stop` hook.
 //!
 //! The finish gate makes notices *verifiable*: before an agent may finish
 //! while depending on a contract another agent changed, Concord waits for that
@@ -14,10 +14,10 @@
 
 use crate::{footprint_and_index, index_revision};
 use anyhow::{Context, Result};
-use concord_core::{AgentId, ChangeKind, Directory, Notice, NoticeKind, SymbolId, SymbolKind, check_call};
-use concord_git::Repo;
+use concord_core::{AgentId, ChangeKind, Digest, Directory, Notice, NoticeKind, SymbolId, SymbolKind, check_call};
+use concord_git::{FileStatus, Repo};
 use concord_lang::{FileIndex, RepoIndex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     /// No hooks at all (baseline).
@@ -84,6 +84,9 @@ pub struct AgentInfo {
     pub session_id: Option<String>,
     pub outbox: Vec<Notice>,
     pub merged_producers: BTreeSet<String>,
+    /// Exact peer commits merged into this agent's worktree, used to filter out
+    /// peer-authored changes even when multi-peer virtual merges had conflicts.
+    pub merged_revs: BTreeMap<String, String>,
     pub index: Option<RepoIndex>,
     pub stats: AgentStats,
     /// Files with conflict markers from a peer merge the agent must resolve.
@@ -96,10 +99,21 @@ pub struct AgentInfo {
     pub snapshot: Option<String>,
     /// Region notices waiting to be delivered.
     pub region_notes: Vec<String>,
+    /// File-level or structural notices waiting to be delivered.
+    pub file_notes: Vec<String>,
+    /// Files currently modified or read by this agent.
+    pub touched_files: BTreeSet<String>,
+    /// Timestamp of earliest unpublished contract edit (for publish debounce).
+    pub unpublished_since: Option<Instant>,
     /// The ticket's acceptance check (shell command), if any.
     pub check: Option<String>,
     /// Failures of the last acceptance check that sent the agent back.
     pub check_failures: Option<usize>,
+    /// Baseline outcome `(passed_alone, failing_ids)` of this agent's `check`
+    /// recorded when it finishes, used to protect finished peers from regressions.
+    pub check_baseline: Option<(bool, BTreeSet<String>)>,
+    /// Times `peer_check_gate` sent this agent back for regressing a finished peer.
+    pub peer_check_blocks: u32,
 }
 
 struct Snapshot {
@@ -123,6 +137,18 @@ pub struct State {
     /// Region coherence: textual overlaps are detected after every edit and
     /// resolved by the yielding agent (see `regions`).
     pub regions: bool,
+    /// Baseline B3: exclusive whole-file leases (first writer locks the file).
+    pub file_leases: bool,
+    /// Baseline B4: Clash/Grove passive textual overlap warnings (no ownership/gate).
+    pub overlap_warnings: bool,
+    /// Ablation A1: treat every body modification as a contract change.
+    pub all_contracts: bool,
+    /// Ablation A2 (`false` = `--no-notices`): suppress live PostToolUse notices.
+    pub deliver_notices: bool,
+    /// Ablation A4 (`false` = `--no-gate`): skip finish-gate blocking on Stop.
+    pub enforce_gate: bool,
+    /// Debounce window before publishing contract changes (default 0 = immediate).
+    pub publish_debounce: Duration,
     /// Region notices already sent: (yielder, owner, file).
     pub(crate) region_alerted: BTreeSet<(String, String, String)>,
     /// Pairs (yielder, owner) with a region yielded at some point: the owner's
@@ -132,6 +158,12 @@ pub struct State {
     /// layers: agent -> agents it is currently waiting for. A wait that would
     /// close a cycle is never entered (no cross-layer deadlock).
     pub(crate) waiting: BTreeMap<String, BTreeSet<String>>,
+    /// Active whole-file exclusive leases (`file -> owner`) for Baseline B3.
+    pub(crate) file_owners: BTreeMap<String, String>,
+    /// Passive overlap alerts already sent (`(agent, peer, file)`) for Baseline B4.
+    pub(crate) overlap_alerted: BTreeSet<(String, String, String)>,
+    /// Structural file alerts already sent (`(agent, peer, file)`).
+    pub(crate) structural_alerted: BTreeSet<(String, String, String)>,
     /// Fails-together check at the finish gate: the test command, if enabled.
     pub together: Option<String>,
     /// Last fails-together verdict per agent, keyed by (snapshot, peers).
@@ -165,9 +197,18 @@ impl State {
             peer_merge: false,
             contracts: true,
             regions: false,
+            file_leases: false,
+            overlap_warnings: false,
+            all_contracts: false,
+            deliver_notices: true,
+            enforce_gate: true,
+            publish_debounce: Duration::ZERO,
             region_alerted: BTreeSet::new(),
             region_yields: BTreeSet::new(),
             waiting: BTreeMap::new(),
+            file_owners: BTreeMap::new(),
+            overlap_alerted: BTreeSet::new(),
+            structural_alerted: BTreeSet::new(),
             together: None,
             together_cache: HashMap::new(),
             revisions: HashMap::new(),
@@ -191,6 +232,7 @@ impl State {
                 session_id: None,
                 outbox: Vec::new(),
                 merged_producers: BTreeSet::new(),
+                merged_revs: BTreeMap::new(),
                 index: None,
                 stats: AgentStats::default(),
                 pending_conflicts: Vec::new(),
@@ -198,10 +240,40 @@ impl State {
                 rank,
                 snapshot: None,
                 region_notes: Vec::new(),
+                file_notes: Vec::new(),
+                touched_files: BTreeSet::new(),
+                unpublished_since: None,
                 check: None,
                 check_failures: None,
+                check_baseline: None,
+                peer_check_blocks: 0,
             },
         );
+    }
+
+    /// Advance an agent's diff baseline after merging `peer_head` into its
+    /// worktree. Uses Concord's verified insertion-union virtual merge so
+    /// multi-peer bases compose cleanly, and never overwrites a multi-peer
+    /// `current_base` with `peer_head` alone (which previously forgot earlier
+    /// merged peers and triggered phantom contract notices).
+    pub fn advance_base(&self, current_base: &str, peer_head: &str) -> String {
+        if self.repo.is_ancestor(peer_head, current_base) {
+            return current_base.to_owned();
+        }
+        if self.repo.is_ancestor(current_base, peer_head) {
+            return peer_head.to_owned();
+        }
+        if let Ok(Some(m)) = self
+            .repo
+            .virtual_merge_union(current_base, peer_head, &crate::regions::verify_union)
+        {
+            return m;
+        }
+        if current_base == self.base {
+            peer_head.to_owned()
+        } else {
+            current_base.to_owned()
+        }
     }
 
     /// Whether `agent` may wait for `target` in the finish gate. Waits that
@@ -251,17 +323,39 @@ impl State {
         Ok(snap)
     }
 
-    /// Recompute an agent's footprint from its worktree, run the protocol, and
-    /// route resulting notices. Contract changes are published immediately.
+    /// Flush any debounced contract publications for `agent`.
+    pub fn flush_publish(&mut self, agent: &str) {
+        let id = AgentId::new(agent);
+        let notices = self.dir.publish_all(&id);
+        if let Some(a) = self.agents.get_mut(agent) {
+            a.unpublished_since = None;
+        }
+        self.route(notices);
+    }
+
+    /// Recompute an agent's footprint from its worktree, filter out changes
+    /// inherited verbatim from merged peers, run the protocol, and route
+    /// resulting notices.
     pub fn refresh(&mut self, agent: &str) -> Result<()> {
-        let (wt, base) = {
+        self.refresh_inner(agent, false)
+    }
+
+    fn refresh_inner(&mut self, agent: &str, force_publish: bool) -> Result<()> {
+        let (wt, base, merged_revs) = {
             let a = self.agents.get(agent).context("unknown agent")?;
-            (a.worktree.clone(), a.base.clone())
+            (a.worktree.clone(), a.base.clone(), a.merged_revs.clone())
         };
         let snap_commit = Repo::snapshot_worktree(&wt)?;
         let base_snap = self.revision(&base)?;
+        let orig_snap = self.revision(&self.base.clone())?;
+        let mut peer_snaps: Vec<Arc<Snapshot>> = Vec::new();
+        for rev in merged_revs.values() {
+            if let Ok(ps) = self.revision(rev) {
+                peer_snaps.push(ps);
+            }
+        }
         let mut warnings = Vec::new();
-        let (fp, index) = footprint_and_index(
+        let (mut fp, index) = footprint_and_index(
             &self.repo,
             &base,
             &snap_commit,
@@ -269,9 +363,102 @@ impl State {
             &base_snap.index,
             &mut warnings,
         )?;
+
+        // Filter out symbol changes and use sites that came verbatim from a
+        // merged peer (prevents phantom contract notices when multi-peer bases
+        // could not be virtual-merged cleanly).
+        if !peer_snaps.is_empty() {
+            let mut filtered = Vec::with_capacity(fp.changes.len());
+            for mut c in fp.changes {
+                let cur = index.symbol(&c.symbol);
+                let mut drop_change = false;
+                for ps in &peer_snaps {
+                    match (cur, ps.index.symbol(&c.symbol)) {
+                        (Some(as_), Some(ps_)) => {
+                            if as_.contract.digest == ps_.contract.digest && as_.body == ps_.body {
+                                drop_change = true;
+                                break;
+                            }
+                            if as_.contract.digest == ps_.contract.digest
+                                && matches!(c.kind, ChangeKind::Added | ChangeKind::ContractChanged)
+                            {
+                                c.kind = ChangeKind::BodyChanged;
+                                c.before = Some(ps_.contract.clone());
+                            }
+                        }
+                        (None, None)
+                            if c.kind == ChangeKind::Removed && orig_snap.index.symbol(&c.symbol).is_some() =>
+                        {
+                            drop_change = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if !drop_change {
+                    filtered.push(c);
+                }
+            }
+            fp.changes = filtered;
+
+            for sites in fp.uses.values_mut() {
+                sites.retain(|u| {
+                    let t = u.text.trim();
+                    t.is_empty()
+                        || !peer_snaps.iter().any(|ps| {
+                            ps.files
+                                .get(&u.path)
+                                .is_some_and(|f| f.refs.iter().any(|r| r.text.trim() == t))
+                        })
+                });
+            }
+            fp.uses.retain(|_, v| !v.is_empty());
+        }
+
+        // Ablation A1 (`--all-contracts`): treat every body change as a
+        // breaking contract modification (no contract vs. body separation).
+        if self.all_contracts {
+            for c in &mut fp.changes {
+                if c.kind == ChangeKind::BodyChanged {
+                    c.kind = ChangeKind::ContractChanged;
+                    let body_hex = index.symbol(&c.symbol).map(|s| s.body.0.as_str()).unwrap_or("body");
+                    if let Some(after) = &mut c.after {
+                        after.digest = Digest::of(&format!("{}:{body_hex}", after.digest.0));
+                        after.signature = None;
+                    }
+                }
+            }
+        }
+
         let id = AgentId::new(agent);
-        let mut notices = self.dir.observe_footprint(&id, &fp.changes, fp.uses.clone());
-        notices.extend(self.dir.publish_all(&id));
+        let mut notices = Vec::new();
+        if self.contracts {
+            notices.extend(self.dir.observe_footprint(&id, &fp.changes, fp.uses.clone()));
+            let has_contract_edit = fp.changes.iter().any(|c| c.is_contract_change());
+            if self.publish_debounce.is_zero() || force_publish {
+                notices.extend(self.dir.publish_all(&id));
+                if let Some(a) = self.agents.get_mut(agent) {
+                    a.unpublished_since = None;
+                }
+            } else if has_contract_edit {
+                let should_flush = self
+                    .agents
+                    .get(agent)
+                    .and_then(|a| a.unpublished_since)
+                    .is_some_and(|t| t.elapsed() >= self.publish_debounce);
+                if should_flush {
+                    notices.extend(self.dir.publish_all(&id));
+                    if let Some(a) = self.agents.get_mut(agent) {
+                        a.unpublished_since = None;
+                    }
+                } else if let Some(a) = self.agents.get_mut(agent)
+                    && a.unpublished_since.is_none()
+                {
+                    a.unpublished_since = Some(Instant::now());
+                }
+            }
+        }
+
         let summary: Vec<Value> = fp
             .changes
             .iter()
@@ -295,10 +482,111 @@ impl State {
         if let Some(a) = self.agents.get_mut(agent) {
             a.index = Some(index);
             a.stats.footprint_refreshes += 1;
-            a.snapshot = Some(snap_commit);
+            a.snapshot = Some(snap_commit.clone());
+            a.touched_files.extend(fp.changed_files.iter().cloned());
         }
+        self.check_file_layers(agent, &base, &snap_commit, &fp.changed_files);
         self.route(notices);
         Ok(())
+    }
+
+    /// Structural file-existence checks, Baseline B3 (`--file-leases`), and
+    /// Baseline B4 (`--overlap-warnings`).
+    fn check_file_layers(&mut self, agent: &str, base: &str, snap_commit: &str, changed_files: &BTreeSet<String>) {
+        // 1. Baseline B3: Exclusive whole-file leases.
+        if self.file_leases {
+            for f in changed_files {
+                match self.file_owners.get(f).cloned() {
+                    None => {
+                        self.file_owners.insert(f.clone(), agent.to_owned());
+                    }
+                    Some(owner) if owner == agent => {}
+                    Some(owner) => {
+                        if self
+                            .structural_alerted
+                            .insert((agent.to_owned(), owner.clone(), f.clone()))
+                            && let Some(a) = self.agents.get_mut(agent)
+                        {
+                            a.file_notes.push(format!(
+                                "[concord] file lease held: `{f}` is currently locked by agent `{owner}`. \
+                                 Leave `{f}` untouched until `{owner}` finishes, or Concord will hold you at the finish gate."
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Baseline B4: Clash/Grove passive textual overlap warnings.
+        if self.overlap_warnings {
+            let peers: Vec<(String, String)> = self
+                .agents
+                .values()
+                .filter(|p| p.name != agent)
+                .filter_map(|p| p.snapshot.clone().map(|s| (p.name.clone(), s)))
+                .collect();
+            for (peer, psnap) in peers {
+                for fc in crate::regions::conflicts(&self.repo, snap_commit, &psnap) {
+                    if self
+                        .overlap_alerted
+                        .insert((agent.to_owned(), peer.clone(), fc.file.clone()))
+                        && let Some(a) = self.agents.get_mut(agent)
+                    {
+                        a.file_notes.push(format!(
+                            "[concord] overlap warning: your changes in `{}` overlap textually with agent `{peer}`.",
+                            fc.file
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 3. Structural file-existence conflicts (deletes vs. reads/edits, duplicate non-code creations).
+        if self.contracts
+            && let Ok(statuses) = self.repo.changed_files(base, snap_commit)
+        {
+            for cf in statuses {
+                if cf.status == FileStatus::Deleted {
+                    let readers: Vec<String> = self
+                        .agents
+                        .values()
+                        .filter(|p| p.name != agent && p.touched_files.contains(&cf.path))
+                        .map(|p| p.name.clone())
+                        .collect();
+                    for peer in readers {
+                        if self
+                            .structural_alerted
+                            .insert((peer.clone(), agent.to_owned(), cf.path.clone()))
+                            && let Some(p) = self.agents.get_mut(&peer)
+                        {
+                            p.file_notes.push(format!(
+                                "[concord] structural file conflict: agent `{agent}` deleted `{}` while you read or modified it.",
+                                cf.path
+                            ));
+                        }
+                    }
+                } else if cf.status == FileStatus::Added && !concord_lang::is_supported_path(&cf.path) {
+                    let creators: Vec<String> = self
+                        .agents
+                        .values()
+                        .filter(|p| p.name != agent && p.touched_files.contains(&cf.path))
+                        .map(|p| p.name.clone())
+                        .collect();
+                    for peer in creators {
+                        if self
+                            .structural_alerted
+                            .insert((agent.to_owned(), peer.clone(), cf.path.clone()))
+                            && let Some(a) = self.agents.get_mut(agent)
+                        {
+                            a.file_notes.push(format!(
+                                "[concord] structural file conflict: both you and agent `{peer}` created `{}`.",
+                                cf.path
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn route(&mut self, notices: Vec<Notice>) {
@@ -337,12 +625,69 @@ impl State {
                 None => vec![],
             },
         };
-        if symbols.is_empty() {
+        if let Some(a) = self.agents.get_mut(agent) {
+            a.touched_files.insert(rel.clone());
+        }
+        if symbols.is_empty() || !self.contracts {
             return;
         }
         let n = symbols.len();
         let notices = self.dir.observe_reads(&AgentId::new(agent), symbols);
         self.log("read", json!({ "agent": agent, "path": rel, "symbols": n }));
+        self.route(notices);
+    }
+
+    fn observe_grep(&mut self, agent: &str, input: &Value) {
+        if !self.contracts {
+            return;
+        }
+        let pattern = input
+            .pointer("/tool_input/pattern")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let path_opt = input
+            .pointer("/tool_input/file_path")
+            .or_else(|| input.pointer("/tool_input/path"))
+            .and_then(Value::as_str);
+        let Some(a) = self.agents.get(agent) else { return };
+        let rel_filter = path_opt.and_then(|p| relative(&a.worktree, Path::new(p)));
+
+        // Extract a meaningful identifier token from the grep pattern (>= 3 chars).
+        let ident: Option<String> = pattern
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|tok| tok.len() >= 3 && tok.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
+            .max_by_key(|tok| tok.len())
+            .map(str::to_owned);
+
+        let ix_opt = a
+            .index
+            .as_ref()
+            .or_else(|| self.revisions.get(&a.base).map(|s| &s.index));
+        let Some(ix) = ix_opt else { return };
+
+        let mut matched: Vec<SymbolId> = Vec::new();
+        for s in ix.symbols() {
+            if let Some(ref rel) = rel_filter
+                && !rel.is_empty()
+                && s.path != *rel
+                && !s.path.starts_with(&format!("{rel}/"))
+            {
+                continue;
+            }
+            if let Some(ref tok) = ident {
+                if s.id.name().contains(tok.as_str()) {
+                    matched.push(s.id.clone());
+                }
+            } else if rel_filter.as_deref() == Some(s.path.as_str()) {
+                matched.push(s.id.clone());
+            }
+        }
+        if matched.is_empty() || matched.len() > 32 {
+            return;
+        }
+        let n = matched.len();
+        let notices = self.dir.observe_reads(&AgentId::new(agent), matched);
+        self.log("grep", json!({ "agent": agent, "pattern": pattern, "symbols": n }));
         self.route(notices);
     }
 
@@ -468,15 +813,12 @@ impl State {
     }
 
     pub fn needs_resume(&mut self, agent: &str) -> Option<String> {
-        if !self.contracts {
+        if !self.contracts || !self.enforce_gate {
             return None;
         }
         let mut remaining = self.auto_ack(agent);
         // A finished agent whose own call sites already satisfy the published
-        // contract has nothing to do: integration merges both sides. Resuming
-        // it only to "receive" the producer's code lengthened the run's tail
-        // (seen in the Hy4 pilot: two rounds of resumes after all agents had
-        // finished, ending in merge and region conflicts).
+        // contract has nothing to do: integration merges both sides.
         let id = AgentId::new(agent);
         let satisfied: Vec<SymbolId> = remaining
             .iter()
@@ -504,13 +846,87 @@ impl State {
     }
 }
 
-/// Handle one hook event. Returns (stdout, exit_code) for the hook process.
+/// Handle one hook or IPC event. Returns (stdout, exit_code) for the caller.
 pub fn handle(shared: &Shared, agent: &str, event: &str, input: &Value) -> (String, i32) {
     match event {
         "PostToolUse" => post_tool_use(shared, agent, input),
         "Stop" => stop(shared, agent, input),
+        "Negotiate" => negotiate(shared, agent, input),
+        "Ack" => explicit_ack(shared, agent, input),
+        "Status" => live_status(shared),
         _ => (String::new(), 0),
     }
+}
+
+fn negotiate(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
+    let mut st = shared.lock().expect("state");
+    let symbol = input.get("symbol").and_then(Value::as_str).unwrap_or("");
+    let proposal = input.get("proposal").and_then(Value::as_str).unwrap_or("");
+    if symbol.is_empty() || proposal.is_empty() {
+        return (
+            json!({ "ok": false, "error": "symbol and proposal are required" }).to_string(),
+            1,
+        );
+    }
+    let sym = SymbolId::new(symbol);
+    match st.dir.negotiate(&AgentId::new(agent), &sym, proposal.to_owned()) {
+        Some(notice) => {
+            let owner = notice.to.0.clone();
+            st.log(
+                "negotiate",
+                json!({ "from": agent, "to": owner, "symbol": sym, "proposal": proposal }),
+            );
+            st.route(vec![notice]);
+            (json!({ "ok": true, "routed_to": owner, "symbol": sym }).to_string(), 0)
+        }
+        None => (
+            json!({ "ok": false, "error": format!("no active peer lease or definition found for {symbol}") })
+                .to_string(),
+            0,
+        ),
+    }
+}
+
+fn explicit_ack(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
+    let mut st = shared.lock().expect("state");
+    let symbol = input.get("symbol").and_then(Value::as_str).unwrap_or("");
+    if symbol.is_empty() {
+        return (json!({ "ok": false, "error": "symbol is required" }).to_string(), 1);
+    }
+    let sym = SymbolId::new(symbol);
+    st.dir.acknowledge(&AgentId::new(agent), &sym);
+    st.log("ack", json!({ "agent": agent, "symbol": sym, "explicit": true }));
+    (json!({ "ok": true, "acknowledged": sym }).to_string(), 0)
+}
+
+fn live_status(shared: &Shared) -> (String, i32) {
+    let st = shared.lock().expect("state");
+    let agents: Vec<Value> = st
+        .agents
+        .values()
+        .map(|a| {
+            let id = AgentId::new(&a.name);
+            json!({
+                "name": a.name,
+                "status": a.status,
+                "branch": a.branch,
+                "stale_symbols": st.dir.stale_symbols(&id),
+                "notices_delivered": a.stats.notices_delivered,
+                "gate_blocks": a.stats.gate_blocks,
+                "merges": a.stats.merges,
+            })
+        })
+        .collect();
+    (
+        json!({
+            "mode": st.mode,
+            "agents": agents,
+            "waiting": st.waiting,
+            "file_owners": st.file_owners,
+        })
+        .to_string(),
+        0,
+    )
 }
 
 fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
@@ -528,8 +944,11 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
     let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
     match tool {
         "Read" => st.observe_read(agent, input),
+        "Grep" => st.observe_grep(agent, input),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Bash" => {
-            if let Err(e) = st.refresh(agent) {
+            // Flush debounced contract publishes immediately on Bash (e.g. test runs).
+            let force_publish = tool == "Bash";
+            if let Err(e) = st.refresh_inner(agent, force_publish) {
                 st.log("error", json!({ "agent": agent, "error": e.to_string() }));
             } else if st.regions && st.mode == Mode::Enforce {
                 crate::regions::after_edit(&mut st, agent);
@@ -537,7 +956,7 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         }
         _ => {}
     }
-    if st.mode != Mode::Enforce {
+    if st.mode != Mode::Enforce || !st.deliver_notices {
         return (String::new(), 0);
     }
     let mut parts: Vec<String> = Vec::new();
@@ -550,6 +969,13 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         && let Some(a) = st.agents.get_mut(agent)
     {
         parts.append(&mut a.region_notes);
+    }
+    if let Some(a) = st.agents.get_mut(agent)
+        && !a.file_notes.is_empty()
+    {
+        let notes = std::mem::take(&mut a.file_notes);
+        a.stats.notices_delivered += notes.len() as u32;
+        parts.extend(notes);
     }
     match (!parts.is_empty()).then(|| parts.join("\n")) {
         Some(text) => {
@@ -565,13 +991,48 @@ fn post_tool_use(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
 
 /// Most times the acceptance check sends an agent back.
 pub const MAX_CHECK_BLOCKS: u32 = 3;
+/// Most times `peer_check_gate` sends an agent back for breaking a finished peer's check.
+pub const MAX_PEER_CHECK_BLOCKS: u32 = 2;
 
-/// The ticket's acceptance check at the finish gate. Runs the check in the
-/// agent's worktree (outside the state lock) and sends the agent back while it
-/// fails, as long as the agent is making progress: the first failure, or
-/// fewer failures than the last time, at most `MAX_CHECK_BLOCKS` times. A
-/// failure that does not shrink is taken to be out of the agent's reach (e.g.
-/// examples that depend on another ticket), and the agent may finish.
+/// Extract concise assertion failure diffs (`___`, `E `, `--- FAIL`, `AssertionError`,
+/// `panicked at`) plus trailing summary lines so `pytest -q` summary tails never
+/// scroll off the actual expected-vs-actual assertion diffs.
+pub fn assertion_excerpt(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        return lines.join("\n");
+    }
+    let mut picked: Vec<&str> = Vec::new();
+    let detail_budget = max_lines.saturating_sub(10);
+    for &l in &lines {
+        if picked.len() >= detail_budget {
+            break;
+        }
+        let t = l.trim_start();
+        if (t.starts_with("___") && t.ends_with("___"))
+            || t.starts_with("E   ")
+            || t.starts_with("E       ")
+            || t.starts_with("--- FAIL:")
+            || t.starts_with("✖ ")
+            || t.starts_with("× ")
+            || t.starts_with("not ok ")
+            || t.contains("error TS")
+            || t.contains("AssertionError")
+            || t.contains("panicked at")
+        {
+            picked.push(l);
+        }
+    }
+    let tail_start = lines.len().saturating_sub(10);
+    for &l in &lines[tail_start..] {
+        if picked.last() != Some(&l) {
+            picked.push(l);
+        }
+    }
+    picked.into_iter().take(max_lines).collect::<Vec<_>>().join("\n")
+}
+
+/// The ticket's acceptance check at the finish gate.
 fn check_gate<'a>(
     shared: &'a Shared,
     st: std::sync::MutexGuard<'a, State>,
@@ -587,6 +1048,7 @@ fn check_gate<'a>(
         .arg("-c")
         .arg(&cmd)
         .current_dir(&wt)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .output();
     let mut st = shared.lock().expect("state");
     let (ok, text) = match out {
@@ -604,6 +1066,9 @@ fn check_gate<'a>(
         }
     };
     if ok {
+        if let Some(a) = st.agents.get_mut(agent) {
+            a.check_baseline = Some((true, BTreeSet::new()));
+        }
         st.log("check", json!({ "agent": agent, "passed": true }));
         return (st, None);
     }
@@ -616,6 +1081,9 @@ fn check_gate<'a>(
         .unwrap_or((0, None));
     let progressing = prev.is_none_or(|p| failures < p);
     if blocks >= MAX_CHECK_BLOCKS || !progressing {
+        if let Some(a) = st.agents.get_mut(agent) {
+            a.check_baseline = Some((false, failing));
+        }
         st.log(
             "check",
             json!({ "agent": agent, "passed": false, "failures": failures, "decision": "allow", "reason": if progressing { "check_limit" } else { "no_progress" } }),
@@ -637,19 +1105,265 @@ fn check_gate<'a>(
     if failing.len() > 25 {
         reason.push_str(&format!("  ... and {} more\n", failing.len() - 25));
     }
-    let lines: Vec<&str> = text.lines().collect();
     reason.push_str(&format!(
-        "Output (tail):\n{}\nFix your implementation so that these pass, run the check again, then finish. \
+        "Assertion details:\n{}\nFix your implementation so that these pass, run the check again, then finish. \
          If a failure depends on a feature that belongs to another ticket, leave it and finish.",
-        lines[lines.len().saturating_sub(15)..].join("\n")
+        assertion_excerpt(&text, 35)
     ));
+    (st, Some(reason))
+}
+
+struct PeerSpec {
+    name: String,
+    head: String,
+    cmd: String,
+    passed_alone: bool,
+    baseline_fails: BTreeSet<String>,
+}
+
+/// Cross-agent acceptance regression gate (enforce mode): ensures that `agent`
+/// does not break tests that already passed in a finished peer's `check`. When
+/// a regression is detected, Concord merges that finished peer into `agent`'s
+/// worktree so `agent` can see both features side-by-side and resolve the
+/// semantic interference immediately.
+fn peer_check_gate<'a>(
+    shared: &'a Shared,
+    mut st: std::sync::MutexGuard<'a, State>,
+    agent: &str,
+) -> (std::sync::MutexGuard<'a, State>, Option<String>) {
+    if st.mode != Mode::Enforce || !st.contracts {
+        return (st, None);
+    }
+    let Some(a) = st.agents.get(agent) else {
+        return (st, None);
+    };
+    if a.peer_check_blocks >= MAX_PEER_CHECK_BLOCKS {
+        return (st, None);
+    }
+    let wt = a.worktree.clone();
+    let Ok(me) = Repo::snapshot_worktree(&wt) else {
+        return (st, None);
+    };
+    let order = crate::run::merge_order(&st);
+    let candidates: Vec<(String, PathBuf, String, String, bool, BTreeSet<String>)> = order
+        .into_iter()
+        .filter_map(|n| st.agents.get(&n))
+        .filter(|p| p.name != agent && p.status == Status::Finished)
+        .filter_map(|p| {
+            let cmd = p.check.clone()?;
+            let (passed_alone, baseline) = p.check_baseline.clone()?;
+            Some((
+                p.name.clone(),
+                p.worktree.clone(),
+                p.branch.clone(),
+                cmd,
+                passed_alone,
+                baseline,
+            ))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return (st, None);
+    }
+    let mut specs = Vec::new();
+    for (name, p_wt, branch, cmd, passed_alone, baseline_fails) in candidates {
+        let _ = Repo::commit_if_dirty(&p_wt, &format!("agent {name}: work committed by concord"));
+        if let Ok(head) = st.repo.rev_parse(&branch) {
+            specs.push(PeerSpec {
+                name,
+                head,
+                cmd,
+                passed_alone,
+                baseline_fails,
+            });
+        }
+    }
+    if specs.is_empty() {
+        return (st, None);
+    }
+    let repo = st.repo.clone();
+    let base_commit = st.base.clone();
+    drop(st);
+
+    // Build virtual union of finished peers (`peers_only`) and `peers_only + me` (`with_me`).
+    let mut peers_only = base_commit;
+    for sp in &specs {
+        if let Ok(Some(m)) = repo.virtual_merge_union(&peers_only, &sp.head, &crate::regions::verify_union) {
+            peers_only = m;
+        }
+    }
+    let Some(with_me) = repo
+        .virtual_merge_union(&peers_only, &me, &crate::regions::verify_union)
+        .ok()
+        .flatten()
+    else {
+        return (shared.lock().expect("state"), None);
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!("concord-peercheck-{}-{}", std::process::id(), now_millis()));
+    let tmp_s = tmp_dir.to_string_lossy().into_owned();
+    if repo
+        .git(&["worktree", "add", "--detach", "--quiet", &tmp_s, &with_me])
+        .is_err()
+    {
+        return (shared.lock().expect("state"), None);
+    }
+
+    let mut culprit: Option<(String, String, String, Vec<String>, String)> = None;
+    for sp in &specs {
+        let Ok(out) = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&sp.cmd)
+            .current_dir(&tmp_dir)
+            .output()
+        else {
+            continue;
+        };
+        if out.status.success() {
+            continue;
+        }
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let fails_merged = crate::together::failing_tests(&text);
+        let mut regressed: BTreeSet<String> = if !fails_merged.is_empty() {
+            fails_merged.difference(&sp.baseline_fails).cloned().collect()
+        } else if sp.passed_alone {
+            ["(acceptance check failed when merged with your changes)".to_owned()].into()
+        } else {
+            BTreeSet::new()
+        };
+        if regressed.is_empty() {
+            continue;
+        }
+
+        // Confirm `peers_only` (without `me`) did not already fail these tests.
+        let p_tmp = std::env::temp_dir().join(format!("concord-peerbase-{}-{}", std::process::id(), now_millis()));
+        let p_tmp_s = p_tmp.to_string_lossy().into_owned();
+        if repo
+            .git(&["worktree", "add", "--detach", "--quiet", &p_tmp_s, &peers_only])
+            .is_ok()
+        {
+            if let Ok(p_out) = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&sp.cmd)
+                .current_dir(&p_tmp)
+                .output()
+                && !p_out.status.success()
+            {
+                let mut pt = String::from_utf8_lossy(&p_out.stdout).into_owned();
+                pt.push_str(&String::from_utf8_lossy(&p_out.stderr));
+                for pre in crate::together::failing_tests(&pt) {
+                    regressed.remove(&pre);
+                }
+            }
+            let _ = repo.git(&["worktree", "remove", "--force", &p_tmp_s]);
+            let _ = std::fs::remove_dir_all(&p_tmp);
+        }
+        if !regressed.is_empty() {
+            culprit = Some((
+                sp.name.clone(),
+                sp.head.clone(),
+                sp.cmd.clone(),
+                regressed.into_iter().collect(),
+                text,
+            ));
+            break;
+        }
+    }
+    let _ = repo.git(&["worktree", "remove", "--force", &tmp_s]);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    st = shared.lock().expect("state");
+    let Some((peer_name, peer_head, peer_cmd, regressed, out_text)) = culprit else {
+        return (st, None);
+    };
+
+    // Merge the regressed peer's finished branch cleanly into `agent`'s worktree
+    // so `agent` can inspect their implementation and run both checks directly.
+    let mut merged_into_wt = st.repo.is_ancestor(&peer_head, &me);
+    if !merged_into_wt {
+        let _ = Repo::commit_if_dirty(
+            &wt,
+            &format!("concord: checkpoint of {agent} before peer-regression merge"),
+        );
+        let msg = format!("concord: merge {peer_name} into {agent} to resolve peer regression");
+        let res = match Repo::merge_into(&wt, &peer_head, &msg) {
+            Ok(m) if m.clean => Ok(m),
+            Ok(m) => Repo::merge_into_union(
+                &wt,
+                &peer_head,
+                &msg,
+                &m.conflicted_files,
+                true,
+                &crate::regions::verify_union,
+            ),
+            Err(e) => Err(e),
+        };
+        if let Ok(m) = res
+            && m.clean
+        {
+            merged_into_wt = true;
+            let new_base = st.advance_base(&st.agents[agent].base.clone(), &peer_head);
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.base = new_base;
+                a.merged_producers.insert(peer_name.clone());
+                a.merged_revs.insert(peer_name.clone(), peer_head.clone());
+                a.stats.merges.push(peer_name.clone());
+            }
+            let _ = st.refresh_inner(agent, true);
+        }
+    }
+    if let Some(a) = st.agents.get_mut(agent) {
+        a.peer_check_blocks += 1;
+        a.stats.gate_blocks += 1;
+        a.check_failures = None;
+    }
+    st.log(
+        "stop",
+        json!({
+            "agent": agent,
+            "decision": "block",
+            "reason": "peer_check_regression",
+            "peer": peer_name,
+            "regressed": regressed.len(),
+            "merged_peer": merged_into_wt,
+        }),
+    );
+    let mut reason = format!(
+        "[concord] peer regression: finished agent `{peer_name}` passed these tests on its own branch, \
+         but your changes break them when integrated ({} regressed):\n",
+        regressed.len()
+    );
+    for t in regressed.iter().take(20) {
+        reason.push_str(&format!("  {t}\n"));
+    }
+    if regressed.len() > 20 {
+        reason.push_str(&format!("  ... and {} more\n", regressed.len() - 20));
+    }
+    reason.push_str(&format!("Assertion details:\n{}\n", assertion_excerpt(&out_text, 30)));
+    if merged_into_wt {
+        reason.push_str(&format!(
+            "Concord has merged `{peer_name}`'s finished code into your worktree so you can see how their feature \
+             works alongside yours. Adapt your code so you do not overwrite or break `{peer_name}`'s handlers/state, \
+             run `{peer_cmd}` AND your own check to verify both pass, then finish."
+        ));
+    } else {
+        reason.push_str(&format!(
+            "Adapt your code so `{peer_name}`'s check (`{peer_cmd}`) and your own check both pass together, then finish."
+        ));
+    }
     (st, Some(reason))
 }
 
 fn finish(st: &mut State, agent: &str) {
     if let Some(a) = st.agents.get_mut(agent) {
+        let _ = Repo::commit_if_dirty(&a.worktree, &format!("agent {agent}: work committed by concord"));
+        if let Ok(h) = st.repo.rev_parse(&a.branch) {
+            a.snapshot = Some(h);
+        }
         a.status = Status::Finished;
     }
+    st.file_owners.retain(|_, owner| owner != agent);
     st.dir.release(&AgentId::new(agent));
     st.log("finished", json!({ "agent": agent }));
 }
@@ -665,10 +1379,10 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         {
             a.session_id = Some(sid.to_owned());
         }
-        if let Err(e) = st.refresh(agent) {
+        if let Err(e) = st.refresh_inner(agent, true) {
             st.log("error", json!({ "agent": agent, "error": e.to_string() }));
         }
-        if st.mode != Mode::Enforce {
+        if st.mode != Mode::Enforce || !st.enforce_gate {
             let remaining = st.auto_ack(agent);
             st.log(
                 "stop",
@@ -702,6 +1416,51 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             finish(&mut st, agent);
             return (String::new(), 0);
         }
+
+        // Baseline B3 (`--file-leases`): wait for or block on active file locks.
+        if st.file_leases
+            && let Some(wt_snap) = st.agents.get(agent).and_then(|a| a.snapshot.clone())
+        {
+            let base = st.agents[agent].base.clone();
+            let modified: Vec<String> = st
+                .repo
+                .changed_files(&base, &wt_snap)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.path)
+                .collect();
+            let locked: Vec<(String, String)> = modified
+                .into_iter()
+                .filter_map(|f| {
+                    let owner = st.file_owners.get(&f)?;
+                    (owner != agent).then(|| (f, owner.clone()))
+                })
+                .collect();
+            if !locked.is_empty() {
+                let owners: BTreeSet<String> = locked
+                    .iter()
+                    .map(|(_, o)| o.clone())
+                    .filter(|o| st.may_wait(agent, o))
+                    .collect();
+                if !owners.is_empty() && Instant::now() < deadline {
+                    st.waiting.insert(agent.to_owned(), owners.clone());
+                    st.log("wait", json!({ "agent": agent, "for": owners, "reason": "file_lease" }));
+                    drop(st);
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                if let Some(a) = st.agents.get_mut(agent) {
+                    a.stats.gate_blocks += 1;
+                }
+                let list: Vec<String> = locked.iter().map(|(f, o)| format!("`{f}` (locked by `{o}`)")).collect();
+                let reason = format!(
+                    "[concord] Exclusive file leases are held on: {}. Restore those files or wait until their owner finishes.",
+                    list.join(", ")
+                );
+                return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+            }
+        }
+
         // A merge with conflict markers is in progress: finish it first.
         if st.peer_merge
             && st.agents.get(agent).is_some_and(|a| a.pending_peer.is_some())
@@ -751,7 +1510,12 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     }
                     // Each finished owner hands over at most once: bounded
                     // progress, so it does not count toward MAX_GATE_BLOCKS.
+                    // Reset `check_failures` because the worktree just received
+                    // a peer's code, so the next check evaluates a new codebase.
                     crate::regions::Gate::Handoff(text) => {
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.check_failures = None;
+                        }
                         st.log(
                             "stop",
                             json!({ "agent": agent, "decision": "block", "reason": "region_handoff" }),
@@ -765,10 +1529,16 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             {
                 if let Some(a) = st.agents.get_mut(agent) {
                     a.stats.gate_blocks += 1;
+                    a.check_failures = None;
                 }
                 return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
             }
             let (guard, block) = check_gate(shared, st, agent);
+            st = guard;
+            if let Some(reason) = block {
+                return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
+            }
+            let (guard, block) = peer_check_gate(shared, st, agent);
             st = guard;
             if let Some(reason) = block {
                 return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
@@ -778,15 +1548,21 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 // the state lock, so other agents' hooks are not delayed).
                 let wt = st.agents[agent].worktree.clone();
                 let me = Repo::snapshot_worktree(&wt).unwrap_or_default();
-                let finished: Vec<(String, PathBuf, String)> = st
-                    .agents
-                    .values()
+                let affected = st.agents.get(agent).and_then(|a| {
+                    a.index
+                        .as_ref()
+                        .map(|ix| ix.affected_tests(&BTreeSet::new(), &a.touched_files))
+                });
+                let order = crate::run::merge_order(&st);
+                let finished: Vec<(String, PathBuf, String)> = order
+                    .into_iter()
+                    .filter_map(|name| st.agents.get(&name))
                     .filter(|p| p.name != agent && p.status == Status::Finished)
                     .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
                     .collect();
                 let mut peers = Vec::new();
                 for (name, p_wt, branch) in finished {
-                    let _ = Repo::commit_all(&p_wt, &format!("agent {name}: work committed by concord"));
+                    let _ = Repo::commit_if_dirty(&p_wt, &format!("agent {name}: work committed by concord"));
                     if let Ok(h) = st.repo.rev_parse(&branch) {
                         peers.push((name, h));
                     }
@@ -803,21 +1579,21 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     None => {
                         let repo = st.repo.clone();
                         drop(st);
-                        let v = crate::together::check(&repo, &cmd, &me, &peers);
+                        let v = crate::together::check_with_affected(&repo, &cmd, &me, &peers, affected.as_ref());
                         st = shared.lock().expect("state");
                         st.together_cache.insert(agent.to_owned(), (key, v.clone()));
                         v
                     }
                 };
                 match &verdict {
-                    crate::together::Verdict::FailsTogether { tests, .. } => {
+                    crate::together::Verdict::FailsTogether { tests, culprits, .. } => {
                         let text = crate::together::render(&st.repo, &st.base, &peers, &verdict);
                         if let Some(a) = st.agents.get_mut(agent) {
                             a.stats.gate_blocks += 1;
                         }
                         st.log(
                             "stop",
-                            json!({ "agent": agent, "decision": "block", "reason": "fails_together", "tests": tests }),
+                            json!({ "agent": agent, "decision": "block", "reason": "fails_together", "tests": tests, "culprits": culprits }),
                         );
                         return (json!({ "decision": "block", "reason": text }).to_string(), 0);
                     }
@@ -834,12 +1610,21 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             return (String::new(), 0);
         }
 
-        // Producers of the contracts this agent is stale on.
-        let producers: BTreeSet<String> = remaining
+        // Producers of the contracts this agent is stale on, plus active
+        // owners of contended/duplicate symbols.
+        let gate_state = st.dir.finish_gate(&AgentId::new(agent));
+        let mut producers: BTreeSet<String> = remaining
             .keys()
             .filter_map(|s| st.dir.published_by(s).map(|p| p.0.clone()))
             .filter(|p| p != agent)
             .collect();
+        for b in &gate_state.blockers {
+            if let concord_core::Blocker::Contended { owner: Some(o), .. } = b
+                && o.0 != agent
+            {
+                producers.insert(o.0.clone());
+            }
+        }
         let unmerged: Vec<String> = producers
             .iter()
             .filter(|p| !st.agents[agent].merged_producers.contains(*p))
@@ -855,19 +1640,19 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             // Never wait for a producer that is itself waiting for us: adapt to
             // the contract as published instead (below).
             let waitable: BTreeSet<String> = running.iter().filter(|p| st.may_wait(agent, p)).cloned().collect();
-            if !waitable.is_empty() && Instant::now() < deadline {
+            if !waitable.is_empty()
+                && Instant::now() < deadline
+                && gate_state
+                    .blockers
+                    .iter()
+                    .all(|b| matches!(b, concord_core::Blocker::Stale { .. }))
+            {
                 st.log("wait", json!({ "agent": agent, "for": running }));
                 st.waiting.insert(agent.to_owned(), waitable);
                 drop(st);
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
-            // The agent cannot wait (cycle, or wait budget spent). Where its own
-            // call sites already conform to the published contract, holding it
-            // cannot make progress (seen live: a consumer was blocked at once on
-            // every attempt until the block limit). Acknowledge those contracts;
-            // the producer's code is integrated later, and a later contract
-            // change makes the agent stale again (resume pass).
             let conforming: Vec<SymbolId> = remaining
                 .iter()
                 .filter(|(s, problems)| {
@@ -882,36 +1667,48 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 }
                 continue;
             }
-            let mut reason = format!(
-                "[concord] {} changed contracts your code depends on and is still working, so Concord cannot merge \
-                 their code yet. Do not wait, poll or schedule anything for them: adapt your own call sites to the \
-                 contracts as published now, run the tests, and finish. Concord merges their code later.\n",
-                running.join(", ")
-            );
-            for (s, problems) in &remaining {
-                let now = st
-                    .dir
-                    .published_contract(s)
-                    .map(|c| c.map(|c| c.display.clone()).unwrap_or_else(|| "(removed)".into()))
-                    .unwrap_or_default();
-                reason.push_str(&format!("  {s} is now: {now}\n"));
-                for p in problems {
-                    reason.push_str(&format!("    {p}\n"));
+            if !remaining.is_empty() {
+                let mut reason = format!(
+                    "[concord] {} changed contracts your code depends on and is still working, so Concord cannot merge \
+                     their code yet. Do not wait, poll or schedule anything for them: adapt your own call sites to the \
+                     contracts as published now, run the tests, and finish. Concord merges their code later.\n",
+                    running.join(", ")
+                );
+                for (s, problems) in &remaining {
+                    let now = st
+                        .dir
+                        .published_contract(s)
+                        .map(|c| c.map(|c| c.display.clone()).unwrap_or_else(|| "(removed)".into()))
+                        .unwrap_or_default();
+                    reason.push_str(&format!("  {s} is now: {now}\n"));
+                    for p in problems {
+                        reason.push_str(&format!("    {p}\n"));
+                    }
                 }
+                if let Some(a) = st.agents.get_mut(agent) {
+                    a.stats.gate_blocks += 1;
+                }
+                st.log(
+                    "stop",
+                    json!({ "agent": agent, "decision": "block", "reason": "producer_running" }),
+                );
+                return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
             }
-            if let Some(a) = st.agents.get_mut(agent) {
-                a.stats.gate_blocks += 1;
-            }
-            st.log(
-                "stop",
-                json!({ "agent": agent, "decision": "block", "reason": "producer_running" }),
-            );
-            return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
         }
 
-        // Merge finished producers into the agent's worktree.
+        // Merge finished stale-contract producers (not duplicate-symbol owners
+        // while we still define a duplicate copy!) into the agent's worktree.
+        let stale_producers: Vec<String> = remaining
+            .keys()
+            .filter_map(|s| st.dir.published_by(s).map(|p| p.0.clone()))
+            .filter(|p| p != agent && !st.agents[agent].merged_producers.contains(p))
+            .filter(|p| st.agents.get(p).is_some_and(|a| a.status == Status::Finished))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
         let mut merge_notes = Vec::new();
-        for p in &unmerged {
+        for p in &stale_producers {
             let (wt, base) = {
                 let a = &st.agents[agent];
                 (a.worktree.clone(), a.base.clone())
@@ -919,9 +1716,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             let Some((p_branch, p_wt)) = st.agents.get(p).map(|x| (x.branch.clone(), x.worktree.clone())) else {
                 continue;
             };
-            // The producer has finished, so its worktree is quiescent: commit its
-            // work so the merge actually carries the change.
-            if let Err(e) = Repo::commit_all(&p_wt, &format!("agent {p}: work committed by concord for merging")) {
+            if let Err(e) = Repo::commit_if_dirty(&p_wt, &format!("agent {p}: work committed by concord for merging")) {
                 st.log("error", json!({ "agent": p, "error": e.to_string() }));
             }
             let p_head = match st.repo.rev_parse(&p_branch) {
@@ -932,9 +1727,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 }
             };
             if st.peer_merge {
-                // With peer merge on, a conflicting producer merge is handed to the
-                // agent with conflict markers instead of being aborted.
-                let result = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
+                let result = Repo::commit_if_dirty(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
                     .and_then(|_| {
                         Repo::merge_keep_conflicts(&wt, &p_head, &format!("concord: merge {p} into {agent}"))
                     });
@@ -942,6 +1735,7 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     Ok(out) if !out.clean => {
                         if let Some(a) = st.agents.get_mut(agent) {
                             a.merged_producers.insert(p.clone());
+                            a.merged_revs.insert(p.clone(), p_head.clone());
                             a.stats.merges.push(p.clone());
                             a.stats.gate_blocks += 1;
                             a.pending_conflicts = out.conflicted_files.clone();
@@ -962,15 +1756,11 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                         return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
                     }
                     Ok(_) => {
-                        let new_base = st
-                            .repo
-                            .virtual_merge(&base, &p_head)
-                            .ok()
-                            .flatten()
-                            .unwrap_or(p_head.clone());
+                        let new_base = st.advance_base(&base, &p_head);
                         if let Some(a) = st.agents.get_mut(agent) {
                             a.base = new_base;
                             a.merged_producers.insert(p.clone());
+                            a.merged_revs.insert(p.clone(), p_head.clone());
                             a.stats.merges.push(p.clone());
                         }
                         merge_notes.push(format!(
@@ -983,19 +1773,28 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                 }
                 continue;
             }
-            let result = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
-                .and_then(|_| Repo::merge_into(&wt, &p_head, &format!("concord: merge {p} into {agent}")));
+            let result = Repo::commit_if_dirty(&wt, &format!("concord: checkpoint of {agent} before merging {p}"))
+                .and_then(
+                    |_| match Repo::merge_into(&wt, &p_head, &format!("concord: merge {p} into {agent}")) {
+                        Ok(m) if m.clean => Ok(m),
+                        Ok(m) => Repo::merge_into_union(
+                            &wt,
+                            &p_head,
+                            &format!("concord: merge {p} into {agent}"),
+                            &m.conflicted_files,
+                            true,
+                            &crate::regions::verify_union,
+                        ),
+                        Err(e) => Err(e),
+                    },
+                );
             match result {
                 Ok(m) if m.clean => {
-                    let new_base = st
-                        .repo
-                        .virtual_merge(&base, &p_head)
-                        .ok()
-                        .flatten()
-                        .unwrap_or(p_head.clone());
+                    let new_base = st.advance_base(&base, &p_head);
                     if let Some(a) = st.agents.get_mut(agent) {
                         a.base = new_base;
                         a.merged_producers.insert(p.clone());
+                        a.merged_revs.insert(p.clone(), p_head.clone());
                         a.stats.merges.push(p.clone());
                     }
                     merge_notes.push(format!(
@@ -1023,13 +1822,12 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             }
         }
         if !merge_notes.is_empty() {
-            if let Err(e) = st.refresh(agent) {
+            if let Err(e) = st.refresh_inner(agent, true) {
                 st.log("error", json!({ "agent": agent, "error": e.to_string() }));
             }
             let remaining = st.auto_ack(agent);
             let gate = st.dir.finish_gate(&AgentId::new(agent));
             if remaining.is_empty() && gate.is_open() {
-                // The merge alone resolved it, but the agent has not seen the merged code yet.
                 let reason = format!(
                     "[concord] {} Your code already conforms to the changed contracts. Run the test suite once \
                      more on the merged code, then finish.",
@@ -1054,22 +1852,45 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             reason.push(' ');
         }
         if remaining.is_empty() {
-            // Gated only by contention: say so concretely.
+            // Gated by contract lease contention or duplicate symbol definition.
             let gate = st.dir.finish_gate(&AgentId::new(agent));
-            reason.push_str("You are changing the contract of symbols another agent is also changing:\n");
+            let mut dups = Vec::new();
+            let mut leases = Vec::new();
             for b in &gate.blockers {
                 if let concord_core::Blocker::Contended { symbol, owner } = b {
                     let who = owner.as_ref().map(|o| o.0.as_str()).unwrap_or("another agent");
-                    reason.push_str(&format!("  {symbol} (lease held by {who})\n"));
+                    if st.dir.defined_by(symbol).is_some_and(|d| d.0 == who && d.0 != agent) {
+                        dups.push((symbol.clone(), who.to_owned()));
+                    } else {
+                        leases.push((symbol.clone(), who.to_owned()));
+                    }
                 }
             }
-            reason.push_str("Keep its existing signature working (add new parameters as optional), then finish again.");
+            if !dups.is_empty() {
+                reason
+                    .push_str("You defined symbols that another agent already defined with the same qualified name:\n");
+                for (sym, who) in &dups {
+                    reason.push_str(&format!("  {sym} (already defined by `{who}`)\n"));
+                }
+                reason.push_str(
+                    "Rename your helper to a distinct name if it is internal to your feature, or remove your duplicate \
+                     definition so Concord can bring in their finished implementation without duplicate definitions.",
+                );
+            } else {
+                reason.push_str("You are changing the contract of symbols another agent is also changing:\n");
+                for (sym, who) in &leases {
+                    reason.push_str(&format!("  {sym} (lease held by {who})\n"));
+                }
+                reason.push_str(
+                    "Keep its existing signature working (add new parameters as optional), then finish again.",
+                );
+            }
             if let Some(a) = st.agents.get_mut(agent) {
                 a.stats.gate_blocks += 1;
             }
             st.log(
                 "stop",
-                json!({ "agent": agent, "decision": "block", "reason": "contended" }),
+                json!({ "agent": agent, "decision": "block", "reason": if !dups.is_empty() { "duplicate_symbol" } else { "contended" } }),
             );
             return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
         }
@@ -1130,18 +1951,20 @@ fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
                 unresolved.join(", ")
             ));
         }
-        if let Err(e) = Repo::commit_all(&wt, &format!("concord: merge {peer} into {agent} (conflicts resolved)")) {
+        if let Err(e) = Repo::commit_if_dirty(&wt, &format!("concord: merge {peer} into {agent} (conflicts resolved)"))
+        {
             st.log("error", json!({ "agent": agent, "error": e.to_string() }));
         }
         let base = st.agents[agent].base.clone();
-        let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head);
+        let new_base = st.advance_base(&base, &head);
         if let Some(a) = st.agents.get_mut(agent) {
             a.base = new_base;
+            a.merged_revs.insert(peer.clone(), head);
             a.pending_conflicts.clear();
             a.pending_peer = None;
         }
         st.log("peer_merge_resolved", json!({ "agent": agent, "peer": peer }));
-        let _ = st.refresh(agent);
+        let _ = st.refresh_inner(agent, true);
     }
 
     // 2. Find a finished peer whose work conflicts textually with ours.
@@ -1152,29 +1975,64 @@ fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
             return None;
         }
     };
-    let peers: Vec<(String, PathBuf, String)> = st
-        .agents
-        .values()
+    let order = crate::run::merge_order(st);
+    let peers: Vec<(String, PathBuf, String)> = order
+        .into_iter()
+        .filter_map(|name| st.agents.get(&name))
         .filter(|p| p.name != agent && p.status == Status::Finished)
         .filter(|p| !st.agents[agent].merged_producers.contains(&p.name))
         .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
         .collect();
     for (peer, p_wt, p_branch) in peers {
-        let _ = Repo::commit_all(&p_wt, &format!("agent {peer}: work committed by concord for merging"));
+        let _ = Repo::commit_if_dirty(&p_wt, &format!("agent {peer}: work committed by concord for merging"));
         let Ok(head) = st.repo.rev_parse(&p_branch) else {
             continue;
         };
+        if st.repo.is_ancestor(&head, &me) {
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.merged_producers.insert(peer.clone());
+                a.merged_revs.insert(peer, head);
+            }
+            continue;
+        }
         let Ok(m) = st.repo.merge_tree(&me, &head) else {
             continue;
         };
         if m.clean {
             continue;
         }
-        let _ = Repo::commit_all(&wt, &format!("concord: checkpoint of {agent} before merging {peer}"));
+        // If the collision is a verified pure two-sided insertion union, keep
+        // both insertions cleanly instead of dumping conflict markers!
+        let _ = Repo::commit_if_dirty(&wt, &format!("concord: checkpoint of {agent} before merging {peer}"));
+        if let Ok(u) = Repo::merge_into_union(
+            &wt,
+            &head,
+            &format!("concord: union merge {peer} into {agent}"),
+            &m.conflicted_files,
+            true,
+            &crate::regions::verify_union,
+        ) && u.clean
+        {
+            let base = st.agents[agent].base.clone();
+            let new_base = st.advance_base(&base, &head);
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.base = new_base;
+                a.merged_producers.insert(peer.clone());
+                a.merged_revs.insert(peer.clone(), head);
+                a.stats.merges.push(peer.clone());
+            }
+            st.log(
+                "peer_merge",
+                json!({ "agent": agent, "peer": peer, "clean": true, "union": true }),
+            );
+            let _ = st.refresh_inner(agent, true);
+            continue;
+        }
         match Repo::merge_keep_conflicts(&wt, &head, &format!("concord: merge {peer} into {agent}")) {
             Ok(out) => {
                 if let Some(a) = st.agents.get_mut(agent) {
                     a.merged_producers.insert(peer.clone());
+                    a.merged_revs.insert(peer.clone(), head.clone());
                     a.stats.merges.push(peer.clone());
                 }
                 st.log(
@@ -1182,13 +2040,12 @@ fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
                     json!({ "agent": agent, "peer": peer, "clean": out.clean, "files": out.conflicted_files }),
                 );
                 if out.clean {
-                    // merge-tree saw a conflict that git merge resolved (e.g. rename detection).
                     let base = st.agents[agent].base.clone();
-                    let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head);
+                    let new_base = st.advance_base(&base, &head);
                     if let Some(a) = st.agents.get_mut(agent) {
                         a.base = new_base;
                     }
-                    let _ = st.refresh(agent);
+                    let _ = st.refresh_inner(agent, true);
                     return Some(format!(
                         "[concord] Concord merged agent `{peer}`'s finished work into your worktree. Run the \
                          tests on the merged code and fix anything that broke, then finish."
@@ -1237,6 +2094,20 @@ fn serve_one(stream: TcpStream, shared: &Shared) -> Result<()> {
     Ok(())
 }
 
+/// Send an IPC request (`Negotiate`, `Ack`, `Status`, `PostToolUse`, `Stop`) to
+/// a running Concord daemon at `addr` and parse the JSON `stdout` payload.
+pub fn daemon_request(addr: &str, agent: &str, event: &str, input: &Value) -> Result<Value> {
+    let mut stream = TcpStream::connect(addr).with_context(|| format!("connecting to concord daemon at {addr}"))?;
+    let req = json!({ "agent": agent, "event": event, "input": input });
+    writeln!(stream, "{req}")?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    let resp: Value = serde_json::from_str(&line)?;
+    let stdout = resp.get("stdout").and_then(Value::as_str).unwrap_or("{}");
+    let parsed: Value = serde_json::from_str(stdout).unwrap_or_else(|_| json!({ "raw": stdout }));
+    Ok(parsed)
+}
+
 /// The `concord hook` client: forward stdin to the daemon and print its answer.
 /// Fails open: if the daemon is unreachable the agent is never disturbed.
 pub fn hook_client(addr: &str, agent: &str, event: &str) -> i32 {
@@ -1277,6 +2148,8 @@ fn notice_kind(n: &Notice) -> &'static str {
         NoticeKind::ContractChanged { breaking: true, .. } => "contract_breaking",
         NoticeKind::ContractChanged { .. } => "contract_compatible",
         NoticeKind::LeaseHeld { .. } => "lease_held",
+        NoticeKind::DuplicateSymbol { .. } => "duplicate_symbol",
+        NoticeKind::Negotiation { .. } => "negotiation",
     }
 }
 

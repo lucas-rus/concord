@@ -38,6 +38,15 @@ pub struct ChangedFile {
     pub path: String,
 }
 
+/// One active git worktree (`git worktree list --porcelain`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    pub head: String,
+    /// Short branch name if checked out on a branch (`None` if detached).
+    pub branch: Option<String>,
+}
+
 /// Result of an in-memory three-way merge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MergeOutcome {
@@ -331,7 +340,21 @@ impl Repo {
         let env = [("GIT_INDEX_FILE", tmp_index.to_string_lossy().into_owned())];
         let result = (|| {
             run_env(wt, &["read-tree", "HEAD"], &env)?;
-            run_env(wt, &["add", "-A", "."], &env)?;
+            run_env(
+                wt,
+                &[
+                    "add",
+                    "-A",
+                    "--",
+                    ".",
+                    ":(exclude)**/__pycache__/**",
+                    ":(exclude)**/*.pyc",
+                    ":(exclude)**/*.pyo",
+                    ":(exclude)**/.pytest_cache/**",
+                    ":(exclude)**/.DS_Store",
+                ],
+                &env,
+            )?;
             let tree = run_env(wt, &["write-tree"], &env)?.trim().to_owned();
             let head = run(wt, &["rev-parse", "HEAD"], None)?.trim().to_owned();
             let commit = run_env(
@@ -374,13 +397,90 @@ impl Repo {
         Ok(())
     }
 
-    /// Commit everything in a worktree (including untracked files); returns HEAD.
+    /// Commit everything in a worktree (including untracked files, excluding
+    /// transient Python/OS bytecode caches); returns HEAD.
     pub fn commit_all(worktree: &Path, message: &str) -> Result<String> {
-        run(worktree, &["add", "-A", "."], None)?;
+        run(
+            worktree,
+            &[
+                "add",
+                "-A",
+                "--",
+                ".",
+                ":(exclude)**/__pycache__/**",
+                ":(exclude)**/*.pyc",
+                ":(exclude)**/*.pyo",
+                ":(exclude)**/.pytest_cache/**",
+                ":(exclude)**/.DS_Store",
+            ],
+            None,
+        )?;
         let mut args: Vec<&str> = IDENTITY.to_vec();
         args.extend(["commit", "-q", "--allow-empty", "--no-verify", "-m", message]);
         run(worktree, &args, None)?;
         Ok(run(worktree, &["rev-parse", "HEAD"], None)?.trim().to_owned())
+    }
+
+    /// Commit everything in a worktree only if there are uncommitted or untracked
+    /// changes; otherwise return HEAD without creating an empty commit.
+    pub fn commit_if_dirty(worktree: &Path, message: &str) -> Result<String> {
+        let status = run(worktree, &["status", "--porcelain"], None)?;
+        if status.trim().is_empty() {
+            return Ok(run(worktree, &["rev-parse", "HEAD"], None)?.trim().to_owned());
+        }
+        Self::commit_all(worktree, message)
+    }
+
+    /// True if `ancestor` is an ancestor of `descendant` (`git merge-base --is-ancestor`).
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
+        Command::new("git")
+            .current_dir(&self.root)
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// List all linked worktrees of this repository (`git worktree list --porcelain`).
+    pub fn list_worktrees(&self) -> Result<Vec<WorktreeEntry>> {
+        let out = self.git(&["worktree", "list", "--porcelain"])?;
+        let mut entries = Vec::new();
+        let mut path: Option<PathBuf> = None;
+        let mut head = String::new();
+        let mut branch: Option<String> = None;
+        let flush = |entries: &mut Vec<WorktreeEntry>,
+                     path: &mut Option<PathBuf>,
+                     head: &mut String,
+                     branch: &mut Option<String>| {
+            if let Some(p) = path.take()
+                && !head.is_empty()
+            {
+                entries.push(WorktreeEntry {
+                    path: p,
+                    head: std::mem::take(head),
+                    branch: branch.take(),
+                });
+            }
+            head.clear();
+            *branch = None;
+        };
+        for line in out.lines() {
+            if line.trim().is_empty() {
+                flush(&mut entries, &mut path, &mut head, &mut branch);
+            } else if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p.trim()));
+            } else if let Some(h) = line.strip_prefix("HEAD ") {
+                head = h.trim().to_owned();
+            } else if let Some(b) = line.strip_prefix("branch ") {
+                let short = b.trim().strip_prefix("refs/heads/").unwrap_or(b.trim());
+                branch = Some(short.to_owned());
+            } else if line.trim() == "bare" {
+                path = None;
+            }
+        }
+        flush(&mut entries, &mut path, &mut head, &mut branch);
+        Ok(entries)
     }
 
     /// Merge `rev` into the worktree's current branch. On conflict the merge is
@@ -547,6 +647,81 @@ impl Repo {
         let mut args: Vec<&str> = IDENTITY.to_vec();
         args.extend(["commit-tree", &m.tree, "-p", a, "-p", b, "-m", "concord virtual base"]);
         Ok(Some(self.git(&args)?.trim().to_owned()))
+    }
+
+    /// Like [`Repo::virtual_merge`], also resolving conflict blocks that are pure
+    /// two-sided insertions (via [`union_text`] + `verify`) completely in memory,
+    /// without touching any worktree.
+    pub fn virtual_merge_union(
+        &self,
+        a: &str,
+        b: &str,
+        verify: &dyn Fn(&str, &str, &str, &str) -> bool,
+    ) -> Result<Option<String>> {
+        if self.is_ancestor(b, a) {
+            return Ok(Some(self.rev_parse(a)?));
+        }
+        if self.is_ancestor(a, b) {
+            return Ok(Some(self.rev_parse(b)?));
+        }
+        let m = self.merge_tree(a, b)?;
+        if m.clean {
+            let mut args: Vec<&str> = IDENTITY.to_vec();
+            args.extend(["commit-tree", &m.tree, "-p", a, "-p", b, "-m", "concord virtual base"]);
+            return Ok(Some(self.git(&args)?.trim().to_owned()));
+        }
+        let Ok(mb) = self.merge_base(a, b) else {
+            return Ok(None);
+        };
+        let base_files = self.read_files(&mb, &m.conflicted_files)?;
+        let ours_files = self.read_files(a, &m.conflicted_files)?;
+        let theirs_files = self.read_files(b, &m.conflicted_files)?;
+        let mut resolved_blobs = Vec::new();
+        for f in &m.conflicted_files {
+            let (Some(ours), Some(theirs)) = (ours_files.get(f), theirs_files.get(f)) else {
+                return Ok(None);
+            };
+            let base = base_files.get(f).map(String::as_str).unwrap_or("");
+            let Some(merged) = union_text(base, ours, theirs)? else {
+                return Ok(None);
+            };
+            if !verify(f, &merged, ours, theirs) {
+                return Ok(None);
+            }
+            let oid = run(&self.root, &["hash-object", "-w", "--stdin"], Some(&merged))?
+                .trim()
+                .to_owned();
+            resolved_blobs.push((f.clone(), oid));
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp_index = std::env::temp_dir().join(format!(
+            "concord-vunion-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let env = [("GIT_INDEX_FILE", tmp_index.to_string_lossy().into_owned())];
+        let res = (|| -> Result<String> {
+            run_env(&self.root, &["read-tree", &m.tree], &env)?;
+            for (f, oid) in &resolved_blobs {
+                let spec = format!("100644,{oid},{f}");
+                run_env(&self.root, &["update-index", "--cacheinfo", &spec], &env)?;
+            }
+            let tree = run_env(&self.root, &["write-tree"], &env)?.trim().to_owned();
+            let mut args: Vec<&str> = IDENTITY.to_vec();
+            args.extend([
+                "commit-tree",
+                &tree,
+                "-p",
+                a,
+                "-p",
+                b,
+                "-m",
+                "concord virtual union base",
+            ]);
+            Ok(self.git(&args)?.trim().to_owned())
+        })();
+        let _ = std::fs::remove_file(&tmp_index);
+        Ok(res.ok())
     }
 }
 
@@ -827,5 +1002,30 @@ mod tests {
         assert_eq!(paths, vec!["a.py", "new.py"]);
         // The real index is untouched.
         assert_eq!(sh(d, &["diff", "--cached", "--name-only"]).trim(), "");
+    }
+
+    #[test]
+    fn commit_if_dirty_and_virtual_merge_union() {
+        let (tmp, repo) = init_repo();
+        let d = tmp.path();
+        let h0 = Repo::commit_if_dirty(d, "noop").unwrap();
+        let h1 = Repo::commit_if_dirty(d, "noop2").unwrap();
+        assert_eq!(h0, h1, "clean worktree creates no empty commit");
+
+        sh(d, &["checkout", "-q", "-b", "p1", &h0]);
+        fs::write(d.join("a.py"), "def f():\n    return 1\n\ndef g():\n    return 2\n").unwrap();
+        let p1 = Repo::commit_if_dirty(d, "p1").unwrap();
+        sh(d, &["checkout", "-q", "-b", "p2", &h0]);
+        fs::write(d.join("a.py"), "def f():\n    return 1\n\ndef h():\n    return 3\n").unwrap();
+        let p2 = Repo::commit_if_dirty(d, "p2").unwrap();
+
+        assert!(repo.virtual_merge(&p1, &p2).unwrap().is_none());
+        let vu = repo
+            .virtual_merge_union(&p1, &p2, &|_, _, _, _| true)
+            .unwrap()
+            .expect("union succeeds");
+        assert!(repo.is_ancestor(&p1, &vu) && repo.is_ancestor(&p2, &vu));
+        let merged = repo.read_files(&vu, &["a.py".into()]).unwrap()["a.py"].clone();
+        assert!(merged.contains("def g():") && merged.contains("def h():"), "{merged}");
     }
 }

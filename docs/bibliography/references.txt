@@ -350,11 +350,24 @@ Many 2026 items are arXiv preprints and are not yet peer-reviewed.
           - no evaluation.
         Concord adds these.
 
-[aura] Aura: run multiple coding agents in parallel without merge conflicts
+[aura] Aura: semantic engine and guardrails for AI coding agents
   Page: https://auravcs.com/learn/run-multiple-coding-agents-in-parallel
-  Why:  Commercial beta with AST merge and symbol claims. It confirms industry
-        interest in symbol-level coordination, but its claims are declared and it
-        publishes no evaluation.
+  Code: https://github.com/Naridon-Inc/aura
+  Why:  Apache-2.0 AST merge and declared symbol claims. Confirms industry
+        interest in symbol-level coordination, whereas Concord observes
+        footprints automatically and verifies cross-file contract conformance.
+
+[weave2026] Weave: entity-level semantic merge driver and MCP server for Git
+  Code: https://github.com/Ataraxy-Labs/weave
+  Why:  2026 Rust Tree-sitter entity merge driver + declared MCP claims. Merges
+        same-file entities cleanly, whereas Concord adds automatic read/write
+        footprint inference, contract vs. body split, cross-file signature
+        conformance checks, and finish gates.
+
+[cork2026] Cork: collaborative version control for parallel AI agents
+  Code: https://github.com/Cork-Technology/cork-cli
+  Why:  Custom collaborative VCS CLI for multi-agent workflows; contrasts with
+        Concord's drop-in Git worktree + MCP design.
 
 [claudesquad] Claude Squad: manage multiple AI terminal agents
   Code: https://github.com/smtg-ai/claude-squad

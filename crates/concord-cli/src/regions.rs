@@ -22,8 +22,10 @@
 //!   running lower-ranked one.
 
 use crate::live::{State, Status};
+use concord_core::SymbolKind;
 use concord_git::{Hunk, Repo};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 /// Most lines of the owner's code quoted per hunk in a notice.
@@ -89,58 +91,54 @@ pub fn insert_only(f: &FileConflict) -> bool {
             .all(|t| f.mine.iter().any(|m| m.old_start == t.old_start))
 }
 
-/// Definitions (functions, classes, Python methods) with their enclosing
-/// class, counted, for Python and TypeScript/JavaScript source.
-fn definitions(text: &str) -> std::collections::BTreeMap<(String, String), usize> {
-    let mut out = std::collections::BTreeMap::new();
-    let mut classes: Vec<(usize, String)> = Vec::new();
-    for line in text.lines() {
-        let body = line.trim_start();
-        if body.is_empty() || body.starts_with('#') || body.starts_with("//") {
-            continue;
-        }
-        let indent = line.len() - body.len();
-        while classes.last().is_some_and(|(i, _)| indent <= *i) {
-            classes.pop();
-        }
-        let rest = ["export default ", "export ", "async "]
-            .iter()
-            .fold(body, |b, p| b.strip_prefix(p).unwrap_or(b));
-        let (kind, rest) = if let Some(r) = rest.strip_prefix("def ") {
-            ("def", r)
-        } else if let Some(r) = rest.strip_prefix("function ") {
-            ("def", r)
-        } else if let Some(r) = rest.strip_prefix("class ") {
-            ("class", r)
-        } else {
-            continue;
-        };
-        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-        if name.is_empty() {
-            continue;
-        }
-        let scope = classes.iter().map(|(_, c)| c.as_str()).collect::<Vec<_>>().join(".");
-        *out.entry((scope, name.clone())).or_insert(0) += 1;
-        if kind == "class" {
-            classes.push((indent, name));
+fn symbol_def_count(display: &str) -> usize {
+    if let Some((_, tail)) = display.rsplit_once("  (+")
+        && let Some(num) = tail.strip_suffix(" more definitions)")
+        && let Ok(extra) = num.parse::<usize>()
+    {
+        return 1 + extra;
+    }
+    1
+}
+
+/// AST-backed symbol definition counts per `(SymbolKind, SymbolId)` for any
+/// supported language (Python, TypeScript/JavaScript, Rust, Go). Nested helper
+/// functions inside function bodies are ignored by the AST indexers, avoiding
+/// false-positive collisions on local closures.
+fn definitions(path: &str, text: &str) -> BTreeMap<(SymbolKind, String), usize> {
+    let mut out = BTreeMap::new();
+    let Some(Ok(idx)) = concord_lang::index_file(path, text) else {
+        return out;
+    };
+    for s in idx.symbols {
+        if matches!(s.kind, SymbolKind::Function | SymbolKind::Method | SymbolKind::Class) {
+            out.insert((s.kind, s.id.0), symbol_def_count(&s.contract.display));
         }
     }
     out
+}
+
+/// Symbols newly defined more times in `merged` than in either `ours` or `theirs`.
+pub fn duplicate_definitions(path: &str, merged: &str, ours: &str, theirs: &str) -> Vec<String> {
+    let (m, o, t) = (
+        definitions(path, merged),
+        definitions(path, ours),
+        definitions(path, theirs),
+    );
+    m.into_iter()
+        .filter(|(k, n)| *n > 1 && *n > o.get(k).copied().unwrap_or(0).max(t.get(k).copied().unwrap_or(0)))
+        .map(|((_, id), _)| id)
+        .collect()
 }
 
 /// Verification of a union of insertions: the merged file parses, and it
 /// does not define anything twice that neither side defined twice (two
 /// agents implementing the same method at different places).
 pub fn verify_union(path: &str, merged: &str, ours: &str, theirs: &str) -> bool {
-    if !parses(path, merged) {
-        return false;
-    }
-    let (m, o, t) = (definitions(merged), definitions(ours), definitions(theirs));
-    m.iter()
-        .all(|(k, n)| *n <= 1 || *n <= o.get(k).copied().unwrap_or(0).max(t.get(k).copied().unwrap_or(0)))
+    parses(path, merged) && duplicate_definitions(path, merged, ours, theirs).is_empty()
 }
 
-/// Whether a file's content still parses (Python, TypeScript/JavaScript);
+/// Whether a file's content still parses (Python, TypeScript/JavaScript, Rust, Go);
 /// languages Concord does not parse are accepted.
 pub fn parses(path: &str, content: &str) -> bool {
     match concord_lang::index_file(path, content) {
@@ -223,6 +221,12 @@ fn owner_of<'a>(st: &'a State, a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a_owns { (a, b) } else { (b, a) }
 }
 
+/// Whether two snapshots can be combined cleanly via Concord's verified
+/// insertion-union merge (including zero duplicate definitions).
+fn can_union_cleanly(repo: &Repo, a: &str, b: &str) -> bool {
+    repo.virtual_merge_union(a, b, &verify_union).ok().flatten().is_some()
+}
+
 /// After an edit of `agent`: check its latest snapshot against every peer's,
 /// and queue a notice for the yielding side of every new collision.
 pub fn after_edit(st: &mut State, agent: &str) {
@@ -236,6 +240,9 @@ pub fn after_edit(st: &mut State, agent: &str) {
         .filter_map(|p| p.snapshot.clone().map(|s| (p.name.clone(), s)))
         .collect();
     for (peer, snap) in peers {
+        if st.repo.is_ancestor(&snap, &me) || st.repo.is_ancestor(&me, &snap) {
+            continue;
+        }
         let found = conflicts(&st.repo, &me, &snap);
         let (owner, yielder) = owner_of(st, agent, &peer);
         let (owner, yielder) = (owner.to_owned(), yielder.to_owned());
@@ -255,19 +262,24 @@ pub fn after_edit(st: &mut State, agent: &str) {
         if new.is_empty() {
             continue;
         }
-        // Insert/insert collisions need no action at all: integration keeps
-        // both insertions (union merge). No yield, no wait, no hand-off.
-        let (union, new): (Vec<FileConflict>, Vec<FileConflict>) = new.into_iter().partition(insert_only);
-        if !union.is_empty() {
-            for f in &union {
+        // Insert/insert collisions that pass verified union merge need no
+        // action at all: integration keeps both insertions (union merge).
+        let union_ok = new.iter().all(insert_only) && can_union_cleanly(&st.repo, &me, &snap);
+        if union_ok {
+            for f in &new {
                 st.region_alerted
                     .insert((yielder.clone(), owner.clone(), f.file.clone()));
             }
             st.log(
                 "region_union",
-                json!({ "yielder": yielder, "owner": owner, "files": union.iter().map(|f| &f.file).collect::<Vec<_>>() }),
+                json!({ "yielder": yielder, "owner": owner, "files": new.iter().map(|f| &f.file).collect::<Vec<_>>() }),
             );
+            continue;
         }
+        let new: Vec<FileConflict> = new
+            .into_iter()
+            .filter(|f| !insert_only(f) || !can_union_cleanly(&st.repo, &me, &snap))
+            .collect();
         if new.is_empty() {
             continue;
         }
@@ -328,28 +340,40 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
         }
     };
     let my_rank = st.agents[agent].rank;
-    // Finished peers first: they can no longer move, so the finishing agent
-    // must fit around them (or build on them).
-    let finished: Vec<(String, std::path::PathBuf, String)> = st
-        .agents
-        .values()
+    // Order finished peers topologically (producers before consumers) so
+    // transitive hand-offs compose cleanly without ordering conflicts.
+    let order = crate::run::merge_order(st);
+    let finished: Vec<(String, std::path::PathBuf, String)> = order
+        .into_iter()
+        .filter_map(|name| st.agents.get(&name))
         .filter(|p| p.name != agent && p.status == Status::Finished)
         .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
         .collect();
     let mut heads = Vec::new();
     for (peer, p_wt, p_branch) in finished {
-        let _ = Repo::commit_all(&p_wt, &format!("agent {peer}: work committed by concord"));
+        let _ = Repo::commit_if_dirty(&p_wt, &format!("agent {peer}: work committed by concord"));
         let Ok(head) = st.repo.rev_parse(&p_branch) else {
             continue;
         };
+        if st.repo.is_ancestor(&head, &me) {
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.merged_producers.insert(peer.clone());
+                a.merged_revs.entry(peer).or_insert(head);
+            }
+            continue;
+        }
         let found = conflicts(&st.repo, &me, &head);
-        if !found.is_empty() && !found.iter().all(insert_only) {
+        if !found.is_empty() && !can_union_cleanly(&st.repo, &me, &head) {
             st.log(
                 "stop",
                 json!({ "agent": agent, "decision": "block", "reason": "region_conflict", "owner": peer, "files": found.iter().map(|f| &f.file).collect::<Vec<_>>() }),
             );
             st.region_yields.insert((agent.to_owned(), peer.clone()));
-            let real: Vec<FileConflict> = found.into_iter().filter(|f| !insert_only(f)).collect();
+            let real: Vec<FileConflict> = if found.iter().any(|f| !insert_only(f)) {
+                found.into_iter().filter(|f| !insert_only(f)).collect()
+            } else {
+                found
+            };
             return Gate::Block(render(&peer, true, &real));
         }
         let union: Vec<String> = found.into_iter().map(|f| f.file).collect();
@@ -365,9 +389,12 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let mut owners = Vec::new();
     let mut text = String::new();
     for (peer, snap) in running {
+        if st.repo.is_ancestor(&snap, &me) {
+            continue;
+        }
         let found = conflicts(&st.repo, &me, &snap);
-        if !found.is_empty() && found.iter().all(insert_only) {
-            // Pure insertions at the same points: integration combines them.
+        if !found.is_empty() && found.iter().all(insert_only) && can_union_cleanly(&st.repo, &me, &snap) {
+            // Verified pure insertions at the same points: integration combines them.
             continue;
         } else if !found.is_empty() {
             for f in &found {
@@ -396,50 +423,83 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     if !owners.is_empty() && may_wait {
         return Gate::Wait(owners, text);
     }
-    // Pending hand-offs: this agent yielded lines to these finished peers, and
-    // the merges are clean. Bring all their versions in at once so the agent
-    // can build on them.
+    // Pending hand-offs: this agent yielded lines to these finished peers, or
+    // shares insert-only points with them. Bring their versions in sequentially,
+    // re-checking against the updated worktree at each step so multi-peer
+    // unions never conflict or leak unmerged state.
     let mut handed = Vec::new();
     let mut combined = false;
-    for (peer, head, union) in heads {
+    for (peer, head, initial_union) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
-        if (!yielded && union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
+        if (!yielded && initial_union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
             continue;
         }
-        let base = st.agents[agent].base.clone();
-        let merged = Repo::commit_all(
+        let _ = Repo::commit_if_dirty(
             &wt,
             &format!("concord: checkpoint of {agent} before hand-off from {peer}"),
-        )
-        .and_then(|_| {
-            let msg = format!("concord: hand-off of {peer}'s regions to {agent}");
-            if union.is_empty() {
-                Repo::merge_into(&wt, &head, &msg)
-            } else {
-                // Insertions at the same points as a finished peer: combine
-                // them now, in this agent's worktree, the finished peer's
-                // first (the order integration uses), so the agent tests the
-                // combined code and its branch then contains the peer's.
-                Repo::merge_into_union(&wt, &head, &msg, &union, true, &verify_union)
+        );
+        let cur_wt = Repo::open(&wt).and_then(|r| r.rev_parse("HEAD")).unwrap_or_default();
+        if !cur_wt.is_empty() && st.repo.is_ancestor(&head, &cur_wt) {
+            let new_base = st.advance_base(&st.agents[agent].base.clone(), &head);
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.base = new_base;
+                a.merged_producers.insert(peer.clone());
+                a.merged_revs.insert(peer, head);
             }
-        });
+            continue;
+        }
+        let msg = format!("concord: hand-off of {peer}'s regions to {agent}");
+        let mut used_union = false;
+        let merged = match Repo::merge_into(&wt, &head, &msg) {
+            Ok(m) if m.clean => Ok(m),
+            Ok(m) => {
+                used_union = true;
+                Repo::merge_into_union(&wt, &head, &msg, &m.conflicted_files, true, &verify_union)
+            }
+            Err(e) => Err(e),
+        };
         match merged {
             Ok(m) if m.clean => {
-                let new_base = st.repo.virtual_merge(&base, &head).ok().flatten().unwrap_or(head.clone());
+                let new_base = st.advance_base(&st.agents[agent].base.clone(), &head);
                 if let Some(a) = st.agents.get_mut(agent) {
                     a.base = new_base;
                     a.merged_producers.insert(peer.clone());
+                    a.merged_revs.insert(peer.clone(), head.clone());
                     a.stats.merges.push(peer.clone());
                 }
-                st.log("region_handoff", json!({ "agent": agent, "owner": peer, "combined": !union.is_empty() }));
-                combined |= !union.is_empty();
+                st.log(
+                    "region_handoff",
+                    json!({ "agent": agent, "owner": peer, "combined": used_union }),
+                );
+                combined |= used_union;
                 handed.push(format!("`{peer}`"));
             }
-            Ok(m) => st.log(
-                "error",
-                json!({ "agent": agent, "error": format!("hand-off merge of {peer} conflicted: {:?}", m.conflicted_files) }),
-            ),
-            Err(e) => st.log("error", json!({ "agent": agent, "error": e.to_string() })),
+            Ok(m) => {
+                st.log(
+                    "region_handoff_conflict",
+                    json!({ "agent": agent, "owner": peer, "files": m.conflicted_files }),
+                );
+                // If earlier peers were already handed over in this batch, let
+                // the agent digest and test those first; otherwise block on
+                // this conflict directly (never fall through to Gate::Clear!).
+                if !handed.is_empty() {
+                    break;
+                }
+                let latest = Repo::snapshot_worktree(&wt).unwrap_or(me);
+                let found = conflicts(&st.repo, &latest, &head);
+                st.region_yields.insert((agent.to_owned(), peer.clone()));
+                return Gate::Block(render(&peer, true, &found));
+            }
+            Err(e) => {
+                st.log("error", json!({ "agent": agent, "error": e.to_string() }));
+                if !handed.is_empty() {
+                    break;
+                }
+                return Gate::Block(format!(
+                    "[concord] Could not merge finished agent `{peer}` into your worktree ({e}). \
+                     Check `git status`, ensure your worktree is clean, run tests, and finish again."
+                ));
+            }
         }
     }
     if !handed.is_empty() {
@@ -468,13 +528,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duplicate_definitions_are_counted_per_class() {
+    fn duplicate_definitions_are_counted_per_class_and_ignore_nested_closures() {
         let text = "class A:\n    def f(self):\n        pass\n\nclass B:\n    def f(self):\n        pass\n";
-        let d = definitions(text);
-        assert_eq!(d[&("A".to_owned(), "f".to_owned())], 1);
-        assert_eq!(d[&("B".to_owned(), "f".to_owned())], 1);
+        let d = definitions("m.py", text);
+        assert_eq!(d[&(SymbolKind::Method, "m.A.f".to_owned())], 1);
+        assert_eq!(d[&(SymbolKind::Method, "m.B.f".to_owned())], 1);
         let twice = format!("{text}    def f(self):\n        return 2\n");
         assert!(!verify_union("m.py", &twice, text, text));
+        assert_eq!(
+            duplicate_definitions("m.py", &twice, text, text),
+            vec!["m.B.f".to_owned()]
+        );
         assert!(verify_union("m.py", text, text, text));
+
+        // Two functions defining identically-named nested closures must NOT be
+        // rejected as duplicate module-level definitions.
+        let ours = "def alpha():\n    def helper():\n        return 1\n    return helper()\n";
+        let theirs = "def beta():\n    def helper():\n        return 2\n    return helper()\n";
+        let merged = format!("{ours}\n{theirs}");
+        assert!(verify_union("m.py", &merged, ours, theirs));
+    }
+
+    #[test]
+    fn verify_union_supports_rust_and_go() {
+        let rs_a = "pub fn a() -> i32 { 1 }\n";
+        let rs_b = "pub fn b() -> i32 { 2 }\n";
+        let rs_dup = "pub fn a() -> i32 { 1 }\npub fn a() -> i32 { 2 }\n";
+        assert!(verify_union("src/lib.rs", &format!("{rs_a}{rs_b}"), rs_a, rs_b));
+        assert!(!verify_union("src/lib.rs", rs_dup, rs_a, rs_a));
+
+        let go_a = "package p\nfunc A() int { return 1 }\n";
+        let go_b = "package p\nfunc B() int { return 2 }\n";
+        let go_dup = "package p\nfunc A() int { return 1 }\nfunc A() int { return 2 }\n";
+        assert!(verify_union(
+            "p/x.go",
+            &format!("{go_a}\nfunc B() int {{ return 2 }}\n"),
+            go_a,
+            go_b
+        ));
+        assert!(!verify_union("p/x.go", go_dup, go_a, go_a));
     }
 }

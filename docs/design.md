@@ -5,10 +5,10 @@ This document summarises the model and protocol implemented in `concord-core` an
 ## Model
 
 - **Symbol** `σ`: a function, method, class or module/class-level variable, identified by its qualified name (`notify.email.send_email`). Code: `concord_core::Symbol`.
-- **Contract** `κ(σ)`: the normalised externally visible shape. Code: `concord_lang::python`.
-  - For functions: decorators, `async`, name, type parameters, ordered parameters with annotations and defaults, and the return annotation.
-  - For classes: decorators, name, bases, annotated fields (dataclass/attrs/pydantic style) and the `__init__` signature.
-  - For variables: name and annotation.
+- **Contract** `κ(σ)`: the normalised externally visible shape across all four front-ends (`concord_lang::{python, typescript, rust_lang, go_lang}`).
+  - For functions/methods: decorators/attributes, `async`, receiver, name, type parameters, ordered parameters with annotations and defaults, and the return annotation.
+  - For classes/structs/traits/interfaces: attributes/decorators, name, bases, annotated fields (Python dataclasses/Pydantic, TypeScript constructors/interfaces, Rust struct fields, Go structs/interfaces) and constructor signature.
+  - For variables/constants/type aliases: name and type annotation.
 - **Body** `β(σ)`: everything else. For classes, only class-level statements count; methods are separate symbols, so a method edit never changes its class.
 - **Canonical digests.** Contracts and bodies are hashed (BLAKE3) over the tree-sitter token stream: leaves joined by single spaces, comments removed, string literals kept verbatim. Formatting and comments therefore never produce a change.
 - **Change classification.** Code: `concord_core::diff_symbols`.
@@ -50,11 +50,13 @@ These are the operations of `concord_core::Directory`, which is pure and determi
   - It takes the agent's current footprint. Leases on reverted contract changes are released.
   - The first contract change of σ takes the lease and sends a **heads-up** to the agents that depend on σ. A contract change of σ while another agent holds its lease produces `LeaseHeld` and blocks the finish gate.
   - Symbols that newly enter the footprint are checked for a **read miss**. If another agent already published a newer contract, the agent is told immediately. Its own worktree still has the old code, so without this it would build on stale code.
-- `observe_reads(agent, symbols)`: read-only interest. The agent is notified of changes but never gated by them.
-- `publish(agent, σ)` / `publish_all(agent)` bump σ's version and send **contract-change notices** to every interested agent, with the recipient's own use sites, and mark them `Stale`. The daemon will call this after a debounce or when the author runs its tests.
-- `acknowledge(agent, σ)`: the agent has incorporated the new contract.
-- `finish_gate(agent)` lists blockers: stale dependencies (U ∪ W) and contended contracts.
-- `release(agent)` drops leases.
+- `observe_reads(agent, symbols)`: read-only interest (from `Read` line spans and `Grep` symbol matches). The agent is notified of changes but never gated by them.
+- **Duplicate-symbol guard**: the first agent to add a new symbol `σ` (`ChangeKind::Added`) claims `defined_by(σ)` even after finishing; any second agent independently adding `σ` receives `NoticeKind::DuplicateSymbol` and is gated (`Blocker::Contended`) until it renames its helper or removes the duplicate.
+- `negotiate(from, σ, proposal)`: routes a `NoticeKind::Negotiation` proposal directly to the live lease holder or definer of `σ`.
+- `publish(agent, σ)` / `publish_all(agent)` bump `σ`'s version and send **contract-change notices** to every interested agent, with the recipient's own use sites, and mark them `Stale`. Supports immediate or debounced (`--publish-debounce-ms`) publication, flushing immediately on `Bash` test runs or `Stop`.
+- `acknowledge(agent, σ)`: the agent has incorporated the new contract (automatically verified via `check_call` or explicitly via `concord_ack`).
+- `finish_gate(agent)` lists blockers: stale dependencies (U ∪ W), contended contracts, and duplicate symbol definitions.
+- `release(agent)` drops active edit leases while retaining `defined_by` ownership of newly added symbols.
 
 **Stale-contract freedom (to be proven in the thesis).** Assume:
 - (i) uses are over-approximated;
@@ -74,16 +76,20 @@ Then no integrated program contains a call site written against an outdated cont
 
 `concord analyze` builds the footprints from git revisions. `--notices` replays them through the protocol (`concord_cli::simulate`). This is the instrument for RQ1 (where do parallel agents break each other?), applied to CooperBench gold patches.
 
-## Live operation (next milestones)
+## Live operation & integration (`concord-cli`)
 
 ```text
-agent tool call --(Claude Code http/command hook)--> concord-daemon
-   PostToolUse(Read/Grep)  -> observe_reads(symbols_in_lines)
-   PostToolUse(Edit/Write/Bash) -> snapshot worktree -> diff vs base -> observe_footprint
-   debounce / test run      -> publish
-   notices                  -> hookSpecificOutput.additionalContext (next tool result)
-   Stop hook                -> finish_gate (block with reason while not open)
-background: snapshot all worktrees -> merge-tree -> type-check (ty) -> affected tests
+agent tool call --(Claude Code hook / OpenCode plugin)--> live::serve (TCP)
+   PostToolUse(Read/Grep)        -> observe_reads
+   PostToolUse(Edit/Write/Bash)  -> snapshot worktree -> filter merged_revs -> observe_footprint
+                                 -> region coherence check (git merge-tree + verified union)
+   notices                       -> hookSpecificOutput.additionalContext / plugin tool result
+   Negotiate / Ack (MCP / IPC)   -> route contract proposal / explicit ack
+   Stop hook / controller turn   -> finish_gate:
+                                      1. contract conformance & producer merge
+                                      2. region hand-off (topological order + verified insertion union)
+                                      3. per-ticket acceptance check (progress-bounded)
+                                      4. optional fails-together check with O(log k) peer bisection
+background (--speculative-secs)  -> virtual union merge -> AST & contract conformance check
+integration & MRP                -> topological merge + verified union + test bisection -> mrp.{json,md}
 ```
-
-CooperBench runs each agent in its own container, so the daemon runs on the host. Agents reach it through `http` hooks at `host.docker.internal` (see [eval/README.md](../eval/README.md)).

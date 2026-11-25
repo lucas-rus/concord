@@ -7,7 +7,7 @@
 
 Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work. It is the subject of a Bachelor thesis at the Faculty of Computer Science, West University of Timișoara (supervisor: Dr. Adrian Spătaru).
 
-> **Status:** research prototype, usable. Working: the symbol/contract engine, the coherence protocol, the offline analyzer, live coordination of real agents (`concord run`, with Claude Code or OpenCode), peer merge, and an MCP server so your own agent can start and follow coordinated teams. See the [roadmap](docs/roadmap.md).
+> **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, and Go** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), live `git worktree` inspector (`concord worktrees`), contract-verified smart merge (`concord merge`), SASE Merge-Readiness Packs (`concord mrp`), and an 11-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md).
 
 ## The problem
 
@@ -72,7 +72,16 @@ Claude Code (plugin with the MCP server and a `concord-team` skill):
 /plugin install concord@lucas-rus-concord
 ```
 
-**Tools:** `concord_run` (start a team: one agent and git worktree per ticket), `concord_status`, `concord_result` (report and integration branch), `concord_analyze` (check existing branches for conflicts and broken contracts), `concord_cancel`. The team's agents are Claude Code (`--agent-cli claude`) or OpenCode (`--agent-cli opencode`) with the model you choose.
+**MCP Tools (11):**
+- **Contract inspection & smart merging (for any agent workflow):**
+  - `concord_symbols` — list symbol signatures and line spans without function bodies (~10× fewer tokens than reading whole files)
+  - `concord_diff_contracts` — contract-level diff between revisions or working tree, with impacted callers
+  - `concord_worktrees` — zero-mutation live check across all active `git worktree` checkouts (Claude Squad, Cursor worktrees, manual worktrees)
+  - `concord_analyze` — check concurrent branches for cross-file contract violations, duplicate symbols, and textual overlaps
+  - `concord_smart_merge` — merge branches producer-first with AST-verified insertion union, post-merge call conformance, and $O(\log k)$ test failure bisection
+  - `concord_negotiate` / `concord_ack` — propose a signature adjustment to a symbol's live owner or acknowledge a peer's contract change
+- **Parallel team orchestration:**
+  - `concord_run`, `concord_status`, `concord_result` (includes SASE Merge-Readiness Pack), `concord_cancel`
 
 ## Try it from the command line
 
@@ -120,10 +129,16 @@ Protocol simulation (notices each agent would receive)
 Other commands:
 
 ```bash
-concord symbols path/to/file.py          # symbols, contracts and digests
-concord diff old.py new.py               # contract vs. body changes between two versions
-concord analyze --base main b1 b2 --json # machine-readable output (for experiments)
+concord symbols src/                            # symbol contracts & spans across files/dirs (Py, TS/JS, Rust, Go)
+concord diff old.py new.py                      # contract vs. body changes between two versions
+concord worktrees --base main                   # inspect all active git worktrees (incl. uncommitted edits)
+concord merge --base main b1 b2 --into merged   # contract-ordered smart merge + verified union + conformance check
+concord mrp .concord/runs/<run-id>              # render SASE Merge-Readiness Pack (markdown or --json)
+concord analyze --base main b1 b2 --json        # machine-readable output (for CI & experiments)
+concord run --tasks tasks.json --mode enforce --regions --test-cmd "npm test"
 ```
+
+> **Zero-config acceptance gating:** `tasks.json` only needs `[{"name": "...", "prompt": "..."}]` — when per-ticket `check` commands are omitted, Concord automatically uses `--test-cmd` for finish-gate verification, cross-agent regression gating, and $O(\log k)$ post-merge failure bisection.
 
 ### Watch a team live
 
@@ -152,6 +167,15 @@ concord  1795518603-enforce-463d82  1/12 finished  03:07 · running
 
 ## Results with real agents
 
+**Twelve agents building a full CommonMark 0.31.2 parser in parallel ([`concord-bench`](https://github.com/lucas-rus/concord-bench)).** Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
+
+| Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
+|---|---|---|---|---|
+| `sequential` (1 agent, ticket-by-ticket) | 645 / 652 (98.9%) | 0 | 0 | 157.1 min (1.0×) |
+| `parallel-off` (12 agents, uncoordinated) | 374 / 652 (57.4%) | 268 | 9 / 12 branches | 29.0 min |
+| `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
+| **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
+
 **A small project built by a team.** Three Haiku agents build [`conta`](examples/conta) (an offline version of a Romanian invoice-processing pipeline) over three milestones, each split into three parallel tickets in which one agent changes an interface the others use. Hidden acceptance tests, validated against a reference solution, check the integrated result. 3 runs per condition ([eval/project](eval/project)):
 
 | | hidden tests passed (of 33) | milestones complete | merge conflicts |
@@ -165,7 +189,7 @@ The two mechanisms fix different failures: the contract layer fixes interface ch
 
 **CooperBench pairs with agents.** 32 randomly sampled CooperBench feature pairs (jinja, click, dirty-equals, dspy), two Haiku agents each, judged by CooperBench's hidden tests ([eval/coop](eval/coop)): both features pass in **1/32** pairs without Concord and **13/32** with Concord (p = 0.0005, exact McNemar). Most CooperBench failures are overlapping edits, which peer merge resolves.
 
-**Shop scenario.** Three agents on ordinary tickets, one of which makes `currency` a required argument of `price_order` ([eval/live](eval/live/README.md)): integrated tests pass in **0/3** runs without Concord and **3/3** with it (Haiku, ≈ $0.03 per run). A first run with Qwen 4 Max through OpenCode also passes with Concord; the comparison without Concord is in progress.
+**Shop scenario.** Three agents on ordinary tickets, one of which makes `currency` a required argument of `price_order` ([eval/live](eval/live/README.md)): integrated tests pass in **0/3** runs without Concord and **3/3** with it (Haiku, ≈ $0.03 per run).
 
 ## First results (RQ1, CooperBench gold patches)
 
@@ -201,14 +225,12 @@ flowchart LR
 
 | Crate | Role | Status |
 |---|---|---|
-| [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, the coherence protocol (pure state machine), pairwise conflict analysis | ✅ M0 |
-| [`concord-lang`](crates/concord-lang) | tree-sitter front-ends: symbols, normalised contracts, body digests, imports, reference resolution | ✅ Python, TypeScript/JavaScript |
-| [`concord-git`](crates/concord-git) | git plumbing: tree reading, in-memory `merge-tree`, dirty-worktree snapshots | ✅ M0 |
-| [`concord-cli`](crates/concord-cli) | `concord` binary: `symbols`, `diff`, `analyze --notices` | ✅ M0 |
-| `concord-daemon` | Host daemon: hook ingestion (HTTP), live directory, notices, finish gate, event log | ⏳ M1 |
-| `concord-mcp` | MCP server for agents (`concord_status`, `concord_negotiate`, ...) | ⏳ M2 |
+| [`concord-core`](crates/concord-core) | Symbols, contract/body change classification, coherence protocol (leases, duplicate-symbol guard, negotiation, finish gate), pairwise conflict analysis | ✅ Complete |
+| [`concord-lang`](crates/concord-lang) | Tree-sitter front-ends: symbols, normalised contracts, body digests, imports, reference resolution, affected-test graph | ✅ Python, TypeScript/JS, Rust, Go |
+| [`concord-git`](crates/concord-git) | Git plumbing: tree reading, in-memory `merge-tree`, patience/diff3 verified insertion-union, worktree snapshots & listing | ✅ Complete |
+| [`concord-cli`](crates/concord-cli) | `concord` binary: `symbols`, `diff`, `analyze`, `worktrees`, `merge`, `mrp`, `run`, `watch`, `mcp` (11 MCP tools + live TCP daemon) | ✅ Complete |
 
-**Languages.** Concord's symbol analysis covers **Python** (`.py`, `.pyi`) and **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`; declaration files, `*.min.js` and `node_modules` are skipped). The front-end is picked by file extension; files in other languages still take part in textual merge checks, but get no symbol-level notices. The TypeScript front-end is syntactic (tree-sitter, no `tsc`): relative imports and re-exports (`export ... from`) are resolved inside the repository, package imports are treated as external, interfaces and enums are classes and type aliases are variables, and type annotations are part of a contract.
+**Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), and **Go** (`.go`) — all four languages of [CooperBench](https://github.com/cooperbench/CooperBench) and the top autonomous-agent languages on GitHub ([AIDev](https://arxiv.org/abs/2507.15003)). Files in other languages still participate in textual/structural merge checks and file-existence guards.
 
 Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech-stack.md](docs/tech-stack.md) · Related work: [docs/research/related-work.md](docs/research/related-work.md) · Evaluation plan: [eval/README.md](eval/README.md)
 
@@ -219,9 +241,10 @@ Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech
 | Claude Code agent teams | tasks; files by convention | declared by lead | no | free-form messages |
 | [Clash](https://github.com/clash-sh/clash) | file (textual merge) | observed diffs | no | pre-edit warning |
 | [Grove](https://github.com/NathanDrake2406/grove) | file, hunk, symbol, import | observed diffs | imports/exports | advisory score |
-| [Claim Plane](https://github.com/SkeinRank/claim-plane) | declared intents/regions | declared by planner | partially | admission (block) |
+| [Weave](https://github.com/Ataraxy-Labs/weave) / [Aura](https://github.com/Naridon-Inc/aura) | AST entities | declared MCP claims | no (same-file entity merge) | entity claim conflict |
+| [Claim Plane](https://github.com/SkeinRank/claim-plane) | declared intents/regions | declared by planner | partially | admission (96.7% serialised) |
 | [Gas Town](https://github.com/gastownhall/gastown) Refinery | merge queue | – | at merge time | no |
-| **Concord** | **symbols; contract vs. body** | **inferred at run time** | **yes, at run time** | **contract notices + finish gate** |
+| **Concord** | **symbols; contract vs. body + regions** | **inferred at run time** | **yes, live + post-merge** | **surgical notices + finish gate + MRP** |
 
 ## License
 

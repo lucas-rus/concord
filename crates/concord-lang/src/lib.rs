@@ -2,15 +2,18 @@
 //!
 //! Language front-ends that turn source files into Concord symbols (with
 //! contract and body digests), import bindings and resolved references.
-//! Supported: Python ([`python`]) and TypeScript/JavaScript ([`typescript`]);
-//! [`index_file`] picks the front-end by file extension.
+//! Supported: Python ([`python`]), TypeScript/JavaScript ([`typescript`]),
+//! Rust ([`rust_lang`]), and Go ([`go_lang`]); [`index_file`] picks the
+//! front-end by file extension.
 
+pub mod go_lang;
 pub mod python;
+pub mod rust_lang;
 pub mod typescript;
 
 use concord_core::{CallArgs, Symbol, SymbolId, SymbolKind, UseSite};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LangError {
@@ -59,7 +62,32 @@ pub struct FileIndex {
 
 /// True if some front-end handles this path (by extension).
 pub fn is_supported_path(path: &str) -> bool {
-    python::is_python_path(path) || typescript::is_typescript_path(path)
+    python::is_python_path(path)
+        || typescript::is_typescript_path(path)
+        || rust_lang::is_rust_path(path)
+        || go_lang::is_go_path(path)
+}
+
+/// True if `path` follows standard test-file naming conventions across
+/// Python, TypeScript/JavaScript, Rust, or Go.
+pub fn is_test_path(path: &str) -> bool {
+    let p = path.trim_start_matches("./");
+    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(&file) = parts.last() else {
+        return false;
+    };
+    if parts[..parts.len() - 1]
+        .iter()
+        .any(|&d| matches!(d, "tests" | "test" | "__tests__" | "spec" | "specs"))
+    {
+        return true;
+    }
+    file.starts_with("test_")
+        || file.ends_with("_test.py")
+        || file.ends_with("_test.go")
+        || file.ends_with("_test.rs")
+        || file.contains(".test.")
+        || file.contains(".spec.")
 }
 
 /// Index a file if its language is supported.
@@ -68,6 +96,10 @@ pub fn index_file(path: &str, source: &str) -> Option<Result<FileIndex, LangErro
         Some(python::index_file(path, source))
     } else if typescript::is_typescript_path(path) {
         Some(typescript::index_file(path, source))
+    } else if rust_lang::is_rust_path(path) {
+        Some(rust_lang::index_file(path, source))
+    } else if go_lang::is_go_path(path) {
+        Some(go_lang::index_file(path, source))
     } else {
         None
     }
@@ -81,6 +113,8 @@ pub struct RepoIndex {
     callables_by_name: HashMap<String, Vec<SymbolId>>,
     /// Module name -> its re-exports (exported name or `*`, target).
     reexports: HashMap<String, Vec<(String, String)>>,
+    /// Distinct Go package module names present in the repository.
+    go_modules: BTreeSet<String>,
 }
 
 impl RepoIndex {
@@ -108,7 +142,11 @@ impl RepoIndex {
         self.by_id.clear();
         self.callables_by_name.clear();
         self.reexports.clear();
+        self.go_modules.clear();
         for (path, f) in &self.files {
+            if go_lang::is_go_path(path) && !f.module.is_empty() {
+                self.go_modules.insert(f.module.clone());
+            }
             for e in &f.exports {
                 self.reexports
                     .entry(f.module.clone())
@@ -125,6 +163,15 @@ impl RepoIndex {
                 }
             }
         }
+    }
+
+    fn resolve_go_import(&self, target: &str) -> Option<String> {
+        let imp = target.strip_prefix("go:")?;
+        self.go_modules
+            .iter()
+            .filter(|m| imp == m.as_str() || imp.ends_with(&format!(".{m}")))
+            .max_by_key(|m| m.len())
+            .cloned()
     }
 
     pub fn files(&self) -> impl Iterator<Item = &FileIndex> {
@@ -174,9 +221,14 @@ impl RepoIndex {
         let head = r.chain.first()?;
         let rest = &r.chain[1..];
 
+        let is_py = python::is_python_path(&file.path);
         let is_ts = typescript::is_typescript_path(&file.path);
+        let is_rs = rust_lang::is_rust_path(&file.path);
+        let is_go = go_lang::is_go_path(&file.path);
         let is_receiver = if is_ts {
             head == "this"
+        } else if is_rs {
+            head == "self" || head == "Self"
         } else {
             head == "self" || head == "cls"
         };
@@ -190,10 +242,20 @@ impl RepoIndex {
         }
 
         // Later bindings shadow earlier ones.
-        if let Some(b) = file.imports.iter().rev().find(|b| &b.local == head)
-            && let Some(s) = self.longest_prefix(&b.target, rest)
-        {
-            return Some(s);
+        if let Some(b) = file.imports.iter().rev().find(|b| &b.local == head) {
+            let target = self.resolve_go_import(&b.target);
+            let eff = target.as_deref().unwrap_or(&b.target);
+            if let Some(s) = self.longest_prefix(eff, rest) {
+                return Some(s);
+            }
+            // Support tsconfig `@/* -> ./src/*` layout when `eff` has no `src.` prefix.
+            if is_ts
+                && !eff.starts_with(typescript::EXTERNAL_PREFIX)
+                && !eff.starts_with("src.")
+                && let Some(s) = self.longest_prefix(&format!("src.{eff}"), rest)
+            {
+                return Some(s);
+            }
         }
 
         if let Some(s) = self.longest_prefix(&format!("{}.{}", file.module, head), rest)
@@ -208,7 +270,9 @@ impl RepoIndex {
         }
 
         for b in file.imports.iter().filter(|b| b.local == "*") {
-            if let Some(s) = self.longest_prefix(&format!("{}.{}", b.target, head), rest) {
+            let target = self.resolve_go_import(&b.target);
+            let eff = target.as_deref().unwrap_or(&b.target);
+            if let Some(s) = self.longest_prefix(&format!("{eff}.{head}"), rest) {
                 return Some(s);
             }
         }
@@ -221,7 +285,11 @@ impl RepoIndex {
         }
         if r.is_call && !rest.is_empty() {
             let name = r.chain.last()?;
-            if is_ts && typescript::is_builtin_method(name) {
+            if (is_py && python::is_builtin_method(name))
+                || (is_ts && typescript::is_builtin_method(name))
+                || (is_rs && rust_lang::is_builtin_method(name))
+                || (is_go && go_lang::is_builtin_method(name))
+            {
                 return None;
             }
             if let Some(c) = self.callables_by_name.get(name)
@@ -279,7 +347,96 @@ impl RepoIndex {
             }
             cur = c.parent().map(SymbolId::new);
         }
+        if self.symbol(from).is_some_and(|s| s.kind == SymbolKind::Method) {
+            return from.parent().map(SymbolId::new);
+        }
         None
+    }
+
+    /// Test files transitively affected by `changed_symbols` or `changed_files`
+    /// (`AffectedTests(G, W)` in the Concord verification loop).
+    pub fn affected_tests(
+        &self,
+        changed_symbols: &BTreeSet<SymbolId>,
+        changed_files: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for f in changed_files {
+            if is_test_path(f) {
+                out.insert(f.clone());
+            }
+        }
+
+        // Build reverse reference graph: target -> Vec<(caller_symbol, caller_path)>.
+        let mut rev: HashMap<SymbolId, Vec<(SymbolId, String)>> = HashMap::new();
+        for f in self.files.values() {
+            for r in &f.refs {
+                let Some(target) = self.resolve(f, r) else {
+                    continue;
+                };
+                if target != r.from {
+                    rev.entry(target).or_default().push((r.from.clone(), f.path.clone()));
+                }
+            }
+        }
+
+        let mut visited: BTreeSet<SymbolId> = BTreeSet::new();
+        let mut queue: VecDeque<(SymbolId, usize)> = VecDeque::new();
+        for s in changed_symbols {
+            if visited.insert(s.clone()) {
+                queue.push_back((s.clone(), 0));
+            }
+        }
+        // If a file changed at module level without symbol edits, seed with its symbols.
+        for path in changed_files {
+            if let Some(f) = self.files.get(path) {
+                for s in &f.symbols {
+                    if visited.insert(s.id.clone()) {
+                        queue.push_back((s.id.clone(), 0));
+                    }
+                }
+            }
+        }
+
+        while let Some((sym, depth)) = queue.pop_front() {
+            if let Some(callers) = rev.get(&sym) {
+                for (caller, caller_path) in callers {
+                    if is_test_path(caller_path) || caller.as_str().contains(".tests.") {
+                        out.insert(caller_path.clone());
+                    }
+                    if depth < 4 && visited.insert(caller.clone()) {
+                        queue.push_back((caller.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+
+        // Stem-based fallback (`src/cmark/inlines.py` -> `tests/test_inlines.py`).
+        let stems: BTreeSet<String> = changed_files
+            .iter()
+            .filter_map(|p| p.rsplit('/').next())
+            .map(|f| {
+                f.split('.')
+                    .next()
+                    .unwrap_or(f)
+                    .trim_start_matches("test_")
+                    .trim_end_matches("_test")
+                    .to_lowercase()
+            })
+            .filter(|s| !s.is_empty() && !matches!(s.as_str(), "init" | "__init__" | "index" | "mod" | "lib" | "main"))
+            .collect();
+        if !stems.is_empty() {
+            for p in self.files.keys() {
+                if is_test_path(p) {
+                    let fname = p.rsplit('/').next().unwrap_or(p).to_lowercase();
+                    if stems.iter().any(|st| fname.contains(st)) {
+                        out.insert(p.clone());
+                    }
+                }
+            }
+        }
+
+        out
     }
 
     /// Longest known symbol among `base`, `base.rest[0]`, `base.rest[0].rest[1]`, ...
@@ -444,5 +601,78 @@ mod tests {
         let r = idx(&[("m.py", "def a():\n    pass\n\ndef b():\n    pass\n")]);
         assert_eq!(r.symbols_in_lines("m.py", 4, 5), vec![SymbolId::new("m.b")]);
         assert_eq!(r.symbols_in_lines("m.py", 1, 5).len(), 2);
+    }
+
+    #[test]
+    fn resolves_rust_cross_file_calls_and_methods() {
+        let files = [
+            (
+                "src/notify/email.rs",
+                "pub struct Mailer { pub host: String }\nimpl Mailer {\n    pub fn send(&self, to: &str, body: &str) -> bool { self.validate(to) && !body.is_empty() }\n    fn validate(&self, to: &str) -> bool { !to.is_empty() }\n}\npub fn send_email(to: &str, body: &str) -> bool { !to.is_empty() && !body.is_empty() }\n",
+            ),
+            (
+                "src/auth/reset.rs",
+                "use crate::notify::email::{Mailer, send_email};\npub fn reset_pw(addr: &str) -> bool {\n    let m = Mailer { host: \"smtp\".into() };\n    m.send(addr, \"tok\") && send_email(addr, \"tok\")\n}\n",
+            ),
+        ];
+        let r = RepoIndex::new(files.iter().map(|(p, s)| crate::index_file(p, s).unwrap().unwrap()));
+        let from: BTreeSet<SymbolId> = [
+            SymbolId::new("auth.reset.reset_pw"),
+            SymbolId::new("notify.email.Mailer.send"),
+        ]
+        .into();
+        let uses = r.uses_from(&from, &BTreeSet::new());
+        assert!(uses.contains_key(&SymbolId::new("notify.email.send_email")), "{uses:?}");
+        assert!(uses.contains_key(&SymbolId::new("notify.email.Mailer")), "{uses:?}");
+        assert!(
+            uses.contains_key(&SymbolId::new("notify.email.Mailer.send")),
+            "{uses:?}"
+        );
+        assert!(
+            uses.contains_key(&SymbolId::new("notify.email.Mailer.validate")),
+            "{uses:?}"
+        );
+    }
+
+    #[test]
+    fn resolves_go_cross_package_calls_and_receiver_methods() {
+        let files = [
+            (
+                "pkg/notify/email.go",
+                "package notify\n\ntype Client struct{}\nfunc (c *Client) Send(to string, body string) error { return c.check(to) }\nfunc (c *Client) check(to string) error { return nil }\nfunc SendEmail(to string, body string) error { return nil }\n",
+            ),
+            (
+                "pkg/auth/reset.go",
+                "package auth\n\nimport (\n\t\"fmt\"\n\t\"github.com/acme/app/pkg/notify\"\n)\n\nfunc Reset(c *notify.Client, addr string) error {\n\tfmt.Println(addr)\n\t_ = c.Send(addr, \"tok\")\n\treturn notify.SendEmail(addr, \"tok\")\n}\n",
+            ),
+        ];
+        let r = RepoIndex::new(files.iter().map(|(p, s)| crate::index_file(p, s).unwrap().unwrap()));
+        let from: BTreeSet<SymbolId> =
+            [SymbolId::new("pkg.auth.Reset"), SymbolId::new("pkg.notify.Client.Send")].into();
+        let uses = r.uses_from(&from, &BTreeSet::new());
+        assert!(uses.contains_key(&SymbolId::new("pkg.notify.SendEmail")), "{uses:?}");
+        assert!(uses.contains_key(&SymbolId::new("pkg.notify.Client.Send")), "{uses:?}");
+        assert!(uses.contains_key(&SymbolId::new("pkg.notify.Client.check")), "{uses:?}");
+    }
+
+    #[test]
+    fn affected_tests_traces_transitive_callers() {
+        let r = idx(&[
+            ("notify/email.py", "def send_email(to, body):\n    return True\n"),
+            (
+                "auth/reset.py",
+                "from notify.email import send_email\ndef request_reset(u):\n    return send_email(u, 'x')\n",
+            ),
+            (
+                "tests/test_reset.py",
+                "from auth.reset import request_reset\ndef test_pw():\n    assert request_reset('a@b')\n",
+            ),
+            ("tests/test_unrelated.py", "def test_other():\n    assert 1 + 1 == 2\n"),
+        ]);
+        let changed_syms: BTreeSet<SymbolId> = [SymbolId::new("notify.email.send_email")].into();
+        let changed_files: BTreeSet<String> = ["notify/email.py".to_owned()].into();
+        let affected = r.affected_tests(&changed_syms, &changed_files);
+        assert!(affected.contains("tests/test_reset.py"), "{affected:?}");
+        assert!(!affected.contains("tests/test_unrelated.py"), "{affected:?}");
     }
 }

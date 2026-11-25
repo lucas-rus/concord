@@ -138,3 +138,112 @@ fn acceptance_check_sends_the_agent_back_while_it_makes_progress() {
         assert_eq!(stop(&shared, "a"), None, "finish_all={finish_all}");
     }
 }
+
+/// Reproduces the runtime handler-table overwrite seen on CommonMark (`links`
+/// overwriting `images-autolinks`'s `"!"` handler without `--fails-together`):
+/// `peer_check_gate` detects that `links` regressed `images`'s passing `check`,
+/// merges `images` into `links`'s worktree, and blocks until both pass.
+#[test]
+fn peer_check_gate_catches_cross_agent_runtime_regression_and_merges_peer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    // Two separate hook slots so `images` and `links` have ZERO textual or symbol conflict!
+    fs::write(
+        root.join("dispatch.py"),
+        concat!(
+            "HANDLERS = {}\n\n",
+            "def setup_a():\n    pass\n\n\n",
+            "def setup_b():\n    pass\n\n\n",
+            "def register_all():\n    setup_a()\n    setup_b()\n",
+        ),
+    )
+    .unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        None,
+        Duration::from_millis(200),
+    )
+    .unwrap();
+    st.regions = true;
+
+    let wt_img = tmp.path().join("wt/images");
+    let wt_lnk = tmp.path().join("wt/links");
+    repo.worktree_add(&wt_img, "b/images", &base).unwrap();
+    repo.worktree_add(&wt_lnk, "b/links", &base).unwrap();
+    st.add_agent("images", wt_img.clone(), "b/images".into(), "images");
+    st.add_agent("links", wt_lnk.clone(), "b/links".into(), "links");
+    st.agents.get_mut("images").unwrap().check = Some(
+        "python3 -c 'import dispatch; dispatch.register_all(); assert dispatch.HANDLERS.get(\"!\") == \"image\"' || { echo 'FAILED test_spec[Images-572]'; exit 1; }".into(),
+    );
+    st.agents.get_mut("links").unwrap().check = Some(
+        "python3 -c 'import dispatch; dispatch.register_all(); assert dispatch.HANDLERS.get(\"[\") == \"link\"' || { echo 'FAILED test_spec[Links-500]'; exit 1; }".into(),
+    );
+    let shared: Shared = Arc::new(Mutex::new(st));
+
+    // `images` edits `setup_a` (lines 3-4) and finishes cleanly with 0 failures.
+    write(
+        &shared,
+        "images",
+        &wt_img,
+        "dispatch.py",
+        concat!(
+            "HANDLERS = {}\n\n",
+            "def setup_a():\n    HANDLERS.setdefault('!', 'image')\n\n\n",
+            "def setup_b():\n    pass\n\n\n",
+            "def register_all():\n    setup_a()\n    setup_b()\n",
+        ),
+    );
+    assert_eq!(stop(&shared, "images"), None);
+
+    // `links` edits `setup_b` (disjoint lines & disjoint symbol!) and overwrites `HANDLERS['!'] = 'bang'`.
+    write(
+        &shared,
+        "links",
+        &wt_lnk,
+        "dispatch.py",
+        concat!(
+            "HANDLERS = {}\n\n",
+            "def setup_a():\n    pass\n\n\n",
+            "def setup_b():\n    HANDLERS['['] = 'link'\n    HANDLERS['!'] = 'bang'\n\n\n",
+            "def register_all():\n    setup_a()\n    setup_b()\n",
+        ),
+    );
+
+    // When `links` tries to finish: its own check passes, git merge is 100% clean,
+    // contracts are unchanged, yet `peer_check_gate` catches `Images-572` regressing
+    // AND merges `images` into `wt_lnk`!
+    let block = stop(&shared, "links").expect("peer_check_gate must block regression");
+    assert!(
+        block.contains("peer regression") && block.contains("`images`") && block.contains("Images-572"),
+        "{block}"
+    );
+    let merged_src = fs::read_to_string(wt_lnk.join("dispatch.py")).unwrap();
+    assert!(
+        merged_src.contains("HANDLERS.setdefault('!', 'image')"),
+        "expected `images`'s code merged into `links` worktree: {merged_src}"
+    );
+
+    // `links` updates `HANDLERS['!']` -> `HANDLERS.setdefault('!', 'bang')` on top of `images` and finishes!
+    write(
+        &shared,
+        "links",
+        &wt_lnk,
+        "dispatch.py",
+        concat!(
+            "HANDLERS = {}\n\n",
+            "def setup_a():\n    HANDLERS.setdefault('!', 'image')\n\n\n",
+            "def setup_b():\n    HANDLERS['['] = 'link'\n    HANDLERS.setdefault('!', 'bang')\n\n\n",
+            "def register_all():\n    setup_a()\n    setup_b()\n",
+        ),
+    );
+    assert_eq!(stop(&shared, "links"), None);
+}

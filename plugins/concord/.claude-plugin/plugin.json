@@ -1,7 +1,7 @@
 {
   "name": "concord",
   "version": "0.1.2",
-  "description": "Run a team of parallel coding agents on your repository, coordinated by Concord (contract notices, finish gate, peer merge), and get one integrated branch. Requires the `concord` binary on your PATH.",
+  "description": "Contract-level & region coherence for parallel AI coding agents across Python, TypeScript/JS, Rust, and Go: 11 MCP tools for symbol inspection, live worktree analysis, smart merging, contract negotiation, parallel team orchestration, and SASE Merge-Readiness Packs.",
   "author": {
     "name": "Lucas-Michael Rus-Gheorghiu"
   },

@@ -82,6 +82,10 @@ pub enum NoticeKind {
     },
     /// You changed a contract whose lease is held by another agent.
     LeaseHeld { owner: AgentId },
+    /// You added a new symbol with the same qualified name another agent already defined.
+    DuplicateSymbol { owner: AgentId, existing: Option<Contract> },
+    /// Another agent proposes an adjustment to a contract you own or published.
+    Negotiation { from: AgentId, proposal: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +171,32 @@ impl Notice {
                      this is reconciled with {owner}.\n"
                 ));
             }
+            NoticeKind::DuplicateSymbol { owner, existing } => {
+                out.push_str(&format!(
+                    "[concord] duplicate symbol: {} is already defined by {}\n",
+                    self.symbol, owner
+                ));
+                if let Some(c) = existing {
+                    out.push_str(&format!("  existing: {}\n", c.display));
+                }
+                out.push_str(&format!(
+                    "  status: defining the same symbol in two branches causes a merge/semantic conflict; \
+                     completion is gated until you rename your private helper or remove the duplicate \
+                     definition and use {owner}'s symbol.\n"
+                ));
+            }
+            NoticeKind::Negotiation { from, proposal } => {
+                out.push_str(&format!(
+                    "[concord] contract negotiation: {} (from {from})\n",
+                    self.symbol
+                ));
+                out.push_str(&format!("  proposal: {proposal}\n"));
+                self.push_sites(&mut out);
+                out.push_str(
+                    "  action: if compatible with your task, adjust the signature (e.g. add a default value) \
+                     so both tasks work smoothly; otherwise keep your contract.\n",
+                );
+            }
         }
         out
     }
@@ -228,6 +258,8 @@ struct SymbolEntry {
     published: Option<Published>,
     owner: Option<AgentId>,
     pending: Option<Pending>,
+    /// First agent that added a brand-new symbol (persists after release, cleared if reverted).
+    defined_by: Option<(AgentId, Option<Contract>)>,
 }
 
 impl SymbolEntry {
@@ -251,6 +283,7 @@ struct AgentEntry {
     seen: BTreeMap<SymbolId, u64>,
     stale: BTreeSet<SymbolId>,
     contended: BTreeSet<SymbolId>,
+    duplicates: BTreeMap<SymbolId, AgentId>,
     warned: BTreeSet<SymbolId>,
 }
 
@@ -382,7 +415,7 @@ impl Directory {
             })
             .collect();
 
-        // Release leases on contracts the agent no longer changes (e.g. reverted edits).
+        // Release leases on contracts (or newly added symbols) the agent no longer writes.
         let old_writes = self.agents[agent].writes.clone();
         for (s, k) in &old_writes {
             if *k == WriteKind::Contract && new_writes.get(s) != Some(&WriteKind::Contract) {
@@ -393,6 +426,40 @@ impl Directory {
                     e.pending = None;
                 }
                 self.agents.get_mut(agent).unwrap().contended.remove(s);
+            }
+            if *k == WriteKind::Added && new_writes.get(s) != Some(&WriteKind::Added) {
+                if let Some(e) = self.symbols.get_mut(s)
+                    && e.defined_by.as_ref().is_some_and(|(who, _)| who == agent)
+                {
+                    e.defined_by = None;
+                }
+                self.agents.get_mut(agent).unwrap().duplicates.remove(s);
+            }
+        }
+
+        // Brand-new symbols: track first definer and report duplicate definitions.
+        for c in changes.iter().filter(|c| matches!(c.kind, ChangeKind::Added)) {
+            let entry = self.symbols.entry(c.symbol.clone()).or_default();
+            if !entry.base_known {
+                entry.base = None;
+                entry.base_known = true;
+            }
+            match entry.defined_by.clone() {
+                Some((owner, existing)) if &owner != agent => {
+                    let a = self.agents.get_mut(agent).unwrap();
+                    if a.duplicates.insert(c.symbol.clone(), owner.clone()).is_none() {
+                        notices.push(Notice {
+                            to: agent.clone(),
+                            symbol: c.symbol.clone(),
+                            kind: NoticeKind::DuplicateSymbol { owner, existing },
+                            sites: vec![],
+                        });
+                    }
+                }
+                _ => {
+                    entry.defined_by = Some((agent.clone(), c.after.clone()));
+                    self.agents.get_mut(agent).unwrap().duplicates.remove(&c.symbol);
+                }
             }
         }
 
@@ -555,6 +622,34 @@ impl Directory {
         owned.iter().flat_map(|s| self.publish(agent, s)).collect()
     }
 
+    /// The agent that first defined a newly added symbol, if any.
+    pub fn defined_by(&self, symbol: &SymbolId) -> Option<&AgentId> {
+        self.symbols
+            .get(symbol)
+            .and_then(|e| e.defined_by.as_ref())
+            .map(|(a, _)| a)
+    }
+
+    /// Propose a contract adjustment on `symbol` to its current owner or latest publisher.
+    pub fn negotiate(&mut self, from: &AgentId, symbol: &SymbolId, proposal: String) -> Option<Notice> {
+        let target = self
+            .owner(symbol)
+            .or_else(|| self.published_by(symbol))
+            .or_else(|| self.defined_by(symbol))
+            .filter(|t| *t != from)?
+            .clone();
+        let sites = self.uses_of(from, symbol);
+        Some(Notice {
+            to: target,
+            symbol: symbol.clone(),
+            kind: NoticeKind::Negotiation {
+                from: from.clone(),
+                proposal,
+            },
+            sites,
+        })
+    }
+
     /// The agent has incorporated the latest contract of `symbol`.
     pub fn acknowledge(&mut self, agent: &AgentId, symbol: &SymbolId) {
         let v = self.version(symbol);
@@ -562,6 +657,7 @@ impl Directory {
             a.seen.insert(symbol.clone(), v);
             a.stale.remove(symbol);
             a.contended.remove(symbol);
+            a.duplicates.remove(symbol);
         }
     }
 
@@ -583,6 +679,12 @@ impl Directory {
             blockers.push(Blocker::Contended {
                 symbol: s.clone(),
                 owner: self.owner(s).cloned(),
+            });
+        }
+        for (s, owner) in &a.duplicates {
+            blockers.push(Blocker::Contended {
+                symbol: s.clone(),
+                owner: Some(owner.clone()),
             });
         }
         Gate { blockers }
@@ -957,5 +1059,52 @@ mod tests {
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].to, r);
         assert!(d.finish_gate(&r).is_open());
+    }
+
+    #[test]
+    fn duplicate_symbol_definitions_are_detected_and_gated() {
+        let (a, b) = (AgentId::new("A"), AgentId::new("B"));
+        let mut d = Directory::new();
+        let add = change("m.helper", ChangeKind::Added, None, Some("def helper(x)"));
+        assert!(
+            d.observe_footprint(&a, std::slice::from_ref(&add), BTreeMap::new())
+                .is_empty()
+        );
+        // Even if A finishes, its added symbol remains defined in A's branch.
+        d.release(&a);
+        let n = d.observe_footprint(&b, &[add], BTreeMap::new());
+        assert_eq!(n.len(), 1);
+        assert!(matches!(&n[0].kind, NoticeKind::DuplicateSymbol { owner, .. } if owner == &a));
+        assert!(!d.finish_gate(&b).is_open());
+        // B renames its private helper: duplicate contention clears.
+        let renamed = change("m._b_helper", ChangeKind::Added, None, Some("def _b_helper(x)"));
+        d.observe_footprint(&b, &[renamed], BTreeMap::new());
+        assert!(d.finish_gate(&b).is_open());
+    }
+
+    #[test]
+    fn contract_negotiation_routes_to_owner() {
+        let (a, b) = (AgentId::new("A"), AgentId::new("B"));
+        let mut d = Directory::new();
+        d.observe_footprint(
+            &b,
+            &[change("auth.reset.f", ChangeKind::Added, None, Some("def f()"))],
+            uses(SEND, "auth/reset.py", 4, "auth.reset.f", "send_email(a, b)"),
+        );
+        d.observe_footprint(
+            &a,
+            &[change(
+                SEND,
+                ChangeKind::ContractChanged,
+                Some("def send_email(to, body)"),
+                Some("def send_email(to, body, *, user_id)"),
+            )],
+            BTreeMap::new(),
+        );
+        let n = d
+            .negotiate(&b, &SymbolId::new(SEND), "make user_id=None optional".into())
+            .expect("negotiation notice");
+        assert_eq!(n.to, a);
+        assert!(n.render().contains("make user_id=None optional"));
     }
 }

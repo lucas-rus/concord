@@ -35,6 +35,26 @@ pub fn is_python_path(path: &str) -> bool {
     path.ends_with(".py") || path.ends_with(".pyi")
 }
 
+/// Method names exclusive to built-in Python `str`/`dict`/`list` APIs that
+/// should not resolve by unique name on an untyped receiver.
+pub fn is_builtin_method(name: &str) -> bool {
+    matches!(
+        name,
+        "setdefault"
+            | "popitem"
+            | "splitlines"
+            | "startswith"
+            | "endswith"
+            | "lstrip"
+            | "rstrip"
+            | "casefold"
+            | "isalnum"
+            | "isalpha"
+            | "isdigit"
+            | "isspace"
+    )
+}
+
 /// Parse and index one Python file.
 pub fn index_file(path: &str, source: &str) -> Result<FileIndex, LangError> {
     let mut parser = Parser::new();

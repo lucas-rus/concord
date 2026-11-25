@@ -48,6 +48,20 @@ pub struct RunConfig {
     pub contracts: bool,
     /// Region coherence (see `live::State::regions`).
     pub regions: bool,
+    /// Baseline B3: exclusive whole-file leases.
+    pub file_leases: bool,
+    /// Baseline B4: Clash/Grove passive textual overlap warnings.
+    pub overlap_warnings: bool,
+    /// Ablation A1: treat every body modification as a contract change.
+    pub all_contracts: bool,
+    /// Ablation A2 (`false` = `--no-notices`): suppress live PostToolUse notices.
+    pub deliver_notices: bool,
+    /// Ablation A4 (`false` = `--no-gate`): skip finish-gate blocking on Stop.
+    pub enforce_gate: bool,
+    /// Debounce window before publishing contract changes.
+    pub publish_debounce: Duration,
+    /// Optional interval (seconds) for continuous background speculative integration.
+    pub speculative_secs: Option<u64>,
     /// Fails-together check at the finish gate (see `together`), with `test_cmd`.
     pub fails_together: bool,
     /// Structured merge driver executable (Mergiraf-compatible CLI).
@@ -119,7 +133,7 @@ fn ended_on_transport_error(log: &Path) -> bool {
             .any(|m| last.to_string().to_lowercase().contains(m))
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentResult {
     pub name: String,
     pub session_id: String,
@@ -139,7 +153,7 @@ pub struct AgentResult {
     pub tests_alone_passed: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Integration {
     pub order: Vec<String>,
     pub conflicts: BTreeMap<String, Vec<String>>,
@@ -149,9 +163,13 @@ pub struct Integration {
     pub unions: BTreeMap<String, Vec<String>>,
     pub tests_passed: bool,
     pub tests_output_tail: String,
+    /// When `tests_passed` is false despite clean git merges, binary bisection
+    /// identifies the first branch whose integration broke `test_cmd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bisected_culprit: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunReport {
     pub run_id: String,
     pub mode: Mode,
@@ -269,7 +287,7 @@ fn spawn_agent(
     if cfg.agent_cli == AgentCli::Opencode {
         return spawn_opencode(cfg, agent, prompt, session, out_dir, attempt);
     }
-    let _ = (shared, addr);
+    let _ = shared;
     let out = out_dir.join(format!("{name}.{attempt}.json"));
     let err = out_dir.join(format!("{name}.{attempt}.err"));
     let mut note = COMMON_NOTE.to_owned();
@@ -306,6 +324,8 @@ fn spawn_agent(
     let child = Command::new(&cfg.claude)
         .current_dir(worktree)
         .env("PWD", worktree)
+        .env("CONCORD_DAEMON_ADDR", addr)
+        .env("CONCORD_AGENT", name)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&out)?)
@@ -386,6 +406,7 @@ fn spawn_opencode(
         cfg_dir,
         worktree: agent.worktree.to_path_buf(),
         shared: agent.shared.clone(),
+        addr: agent.addr.to_owned(),
         name: name.clone(),
         out: out.clone(),
         log_prefix: out_dir.join(format!("{name}.{attempt}")),
@@ -406,6 +427,7 @@ struct OpencodeJob {
     cfg_dir: PathBuf,
     worktree: PathBuf,
     shared: Shared,
+    addr: String,
     name: String,
     out: PathBuf,
     log_prefix: PathBuf,
@@ -509,6 +531,9 @@ impl OpencodeJob {
             // the directory `concord run` was started from.
             .env("PWD", &self.worktree)
             .env("OPENCODE_CONFIG_DIR", &self.cfg_dir)
+            .env("CONCORD_DAEMON_ADDR", &self.addr)
+            .env("CONCORD_AGENT", &self.name)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
             .args(["run", "--standalone", "--auto", "--format", "json", "-m", &self.model]);
         if let Some(s) = session {
             cmd.args(["--session", s]);
@@ -659,14 +684,69 @@ fn run_tests(cmd: &str, dir: &Path) -> (bool, String) {
     }
 }
 
-/// Order agents so that producers merged into an agent come before it.
-fn merge_order(st: &State) -> Vec<String> {
+struct FailingTaskCheck {
+    name: String,
+    cmd: String,
+    ids: Vec<String>,
+    output: String,
+}
+
+/// Evaluate every task's `check` command on `dir`, returning `(unique_failure_count,
+/// failing_tasks)`.
+fn evaluate_task_checks(tasks: &[Task], dir: &Path) -> (usize, Vec<FailingTaskCheck>) {
+    let mut all_unique: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut failing_tasks = Vec::new();
+    for t in tasks {
+        let Some(cmd) = &t.check else { continue };
+        let Ok(o) = Command::new("sh").arg("-c").arg(cmd).current_dir(dir).output() else {
+            continue;
+        };
+        if o.status.success() {
+            continue;
+        }
+        let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&o.stderr));
+        let ids: Vec<String> = crate::together::failing_tests(&text).into_iter().collect();
+        if ids.is_empty() {
+            all_unique.insert(format!("__task_failed__:{}", t.name));
+        } else {
+            all_unique.extend(ids.iter().cloned());
+        }
+        failing_tasks.push(FailingTaskCheck {
+            name: t.name.clone(),
+            cmd: cmd.clone(),
+            ids,
+            output: text,
+        });
+    }
+    (all_unique.len(), failing_tasks)
+}
+
+/// Order agents so that producers merged into an agent (and contract producers
+/// whose symbols an agent depends on) come before it, breaking ties by task rank.
+pub(crate) fn merge_order(st: &State) -> Vec<String> {
+    let mut deps: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for (name, a) in &st.agents {
+        let mut d = a.merged_producers.clone();
+        if let Some(ix) = &a.index {
+            for s in ix.symbols() {
+                if let Some(p) = st.dir.published_by(&s.id)
+                    && p.0 != *name
+                    && !st.dir.uses_of(&concord_core::AgentId::new(name), &s.id).is_empty()
+                {
+                    d.insert(p.0.clone());
+                }
+            }
+        }
+        deps.insert(name.clone(), d);
+    }
     let mut order: Vec<String> = Vec::new();
     let mut left: Vec<String> = st.agents.keys().cloned().collect();
+    left.sort_by_key(|n| st.agents.get(n).map(|a| a.rank).unwrap_or(usize::MAX));
     while !left.is_empty() {
         let pos = left
             .iter()
-            .position(|a| st.agents[a].merged_producers.iter().all(|p| order.contains(p)))
+            .position(|a| deps[a].iter().all(|p| order.contains(p) || !st.agents.contains_key(p)))
             .unwrap_or(0);
         order.push(left.remove(pos));
     }
@@ -698,6 +778,9 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         Some(&run_dir.join("events.jsonl")),
         cfg.max_wait,
     )?;
+    let has_real_test_cmd = !cfg.test_cmd.trim().is_empty() && cfg.test_cmd.trim() != "true";
+    let fallback_check =
+        (cfg.mode == Mode::Enforce && cfg.contracts && has_real_test_cmd).then(|| cfg.test_cmd.clone());
     let mut worktrees = BTreeMap::new();
     for t in &cfg.tasks {
         let branch = format!("concord/{run_id}/{}", t.name);
@@ -705,13 +788,19 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         repo.worktree_add(&wt, &branch, &base)?;
         state.add_agent(&t.name, wt.clone(), branch, &t.prompt);
         if let Some(a) = state.agents.get_mut(&t.name) {
-            a.check = t.check.clone();
+            a.check = t.check.clone().or_else(|| fallback_check.clone());
         }
         worktrees.insert(t.name.clone(), wt);
     }
     state.peer_merge = cfg.peer_merge;
     state.contracts = cfg.contracts;
     state.regions = cfg.regions;
+    state.file_leases = cfg.file_leases;
+    state.overlap_warnings = cfg.overlap_warnings;
+    state.all_contracts = cfg.all_contracts;
+    state.deliver_notices = cfg.deliver_notices;
+    state.enforce_gate = cfg.enforce_gate;
+    state.publish_debounce = cfg.publish_debounce;
     state.together = cfg.fails_together.then(|| cfg.test_cmd.clone());
     if let Some(cmd) = &cfg.merge_driver {
         let driver = format!("{cmd} merge --git %O %A %B -s %S -x %X -y %Y -p %P -l %L");
@@ -731,8 +820,51 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
             }
         });
     }
+    // Optional continuous background speculative integration loop (`Alg. 2`).
+    if let Some(secs) = cfg.speculative_secs.filter(|&s| s > 0) {
+        let (beating_s, shared_s, repo_s, base_s) = (beating.clone(), shared.clone(), repo.clone(), base.clone());
+        std::thread::spawn(move || {
+            while beating_s.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(secs));
+                if !beating_s.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let snaps: Vec<(String, String)> = {
+                    let Ok(st) = shared_s.lock() else { continue };
+                    merge_order(&st)
+                        .into_iter()
+                        .filter_map(|n| st.agents.get(&n).and_then(|a| a.snapshot.clone().map(|s| (n, s))))
+                        .collect()
+                };
+                if snaps.len() < 2 {
+                    continue;
+                }
+                let mut cur = base_s.clone();
+                let mut unmergeable = Vec::new();
+                for (name, snap) in &snaps {
+                    match repo_s.virtual_merge_union(&cur, snap, &crate::regions::verify_union) {
+                        Ok(Some(m)) => cur = m,
+                        _ => unmergeable.push(name.clone()),
+                    }
+                }
+                let (parse_errs, contract_viols) = crate::mrp::verify_merged_contracts(&repo_s, &base_s, &cur);
+                if let Ok(mut st) = shared_s.lock() {
+                    st.log(
+                        "speculative_check",
+                        json!({
+                            "agents": snaps.len(),
+                            "unmergeable": unmergeable,
+                            "parse_errors": parse_errs.len(),
+                            "contract_violations": contract_viols.len(),
+                        }),
+                    );
+                }
+            }
+        });
+    }
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?.to_string();
+    let _ = std::fs::write(run_dir.join("daemon.addr"), &addr);
     if cfg.mode != Mode::Off {
         let s = shared.clone();
         std::thread::spawn(move || live::serve(listener, s));
@@ -745,7 +877,12 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         let settings = agents_dir.join(format!("{}.settings.json", t.name));
         std::fs::write(
             &settings,
-            serde_json::to_string_pretty(&settings_json(cfg, &addr, &t.name, t.check.is_some()))?,
+            serde_json::to_string_pretty(&settings_json(
+                cfg,
+                &addr,
+                &t.name,
+                t.check.is_some() || fallback_check.is_some(),
+            ))?,
         )?;
         let sid = uuid_v4();
         running.push(spawn_agent(
@@ -815,18 +952,233 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         }
     }
 
-    // Commit each agent's work and run its tests alone.
+    // Commit each agent's work (only if dirty).
     for (name, wt) in &worktrees {
-        Repo::commit_all(wt, &format!("agent {name}: final work"))?;
+        Repo::commit_if_dirty(wt, &format!("agent {name}: final work"))?;
+    }
+
+    // Integrate in dependency order with verified union merge and batch-and-bisect.
+    let order = {
+        let st = shared.lock().expect("state");
+        merge_order(&st)
+    };
+    let mut integration = Integration {
+        order,
+        ..Default::default()
+    };
+    let iwt = run_dir.join("wt").join("_integration");
+    repo.worktree_add(&iwt, &format!("concord/{run_id}/integration"), &base)?;
+    let allow_union = cfg.regions || (cfg.mode == Mode::Enforce && cfg.contracts);
+    let mut prefix_commits: Vec<(String, String)> = Vec::new();
+    for name in &integration.order {
+        let head = repo.rev_parse(&format!("concord/{run_id}/{name}"))?;
+        let msg = format!("integrate agent {name}");
+        let mut m = Repo::merge_into(&iwt, &head, &msg)?;
+        if !m.clean && allow_union {
+            // Validated two-sided insertion union: both insertions kept whole,
+            // earlier agents first, AST-verified for syntax and zero duplicate defs.
+            let files = m.conflicted_files.clone();
+            let u = Repo::merge_into_union(&iwt, &head, &msg, &files, false, &crate::regions::verify_union)?;
+            if u.clean {
+                integration.unions.insert(name.clone(), files);
+                m = u;
+            }
+        }
+        if m.clean {
+            if let Ok(iwt_repo) = Repo::open(&iwt)
+                && let Ok(sha) = iwt_repo.rev_parse("HEAD")
+            {
+                prefix_commits.push((name.clone(), sha));
+            }
+        } else {
+            integration.conflicts.insert(name.clone(), m.conflicted_files);
+        }
+    }
+
+    // Post-integration acceptance verification pass (enforce mode): once all
+    // parallel features are merged together, cross-ticket dependencies are
+    // satisfied. Works both with explicit per-ticket `t.check` commands AND
+    // zero-config with a single project-wide `--test-cmd` (using O(log k)
+    // prefix bisection to target the culprit agent), guarded by a strict
+    // monotonic test-improvement ratchet.
+    let explicit_checks = cfg.tasks.iter().any(|t| t.check.is_some());
+    if cfg.mode == Mode::Enforce
+        && cfg.contracts
+        && cfg.enforce_gate
+        && cfg.resume_rounds > 0
+        && integration.conflicts.is_empty()
+        && (explicit_checks || has_real_test_cmd)
+    {
+        let check_targets: Vec<Task> = if explicit_checks {
+            cfg.tasks.clone()
+        } else {
+            let probe = vec![Task {
+                name: prefix_commits
+                    .last()
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_else(|| cfg.tasks[0].name.clone()),
+                prompt: String::new(),
+                check: Some(cfg.test_cmd.clone()),
+            }];
+            let (probe_fails, _) = evaluate_task_checks(&probe, &iwt);
+            if probe_fails == 0 {
+                Vec::new()
+            } else {
+                let culprit = crate::mrp::bisect_prefix_failure(&repo, &prefix_commits, &cfg.test_cmd)
+                    .or_else(|| prefix_commits.last().map(|(n, _)| n.clone()))
+                    .unwrap_or_else(|| cfg.tasks[0].name.clone());
+                vec![Task {
+                    name: culprit,
+                    prompt: String::new(),
+                    check: Some(cfg.test_cmd.clone()),
+                }]
+            }
+        };
+        let (mut cur_failures, initial_failing) = evaluate_task_checks(&check_targets, &iwt);
+        for ft in initial_failing.into_iter().take(4) {
+            if cur_failures == 0 {
+                break;
+            }
+            let task_name = ft.name;
+            let check_cmd = ft.cmd;
+            // Re-check this specific ticket in case an earlier reconciliation already fixed it.
+            let (_, single) = evaluate_task_checks(
+                &[Task {
+                    name: task_name.clone(),
+                    prompt: String::new(),
+                    check: Some(check_cmd.clone()),
+                }],
+                &iwt,
+            );
+            let Some(cur_ft) = single.into_iter().next() else {
+                continue;
+            };
+            let (failing_ids, out_text) = (cur_ft.ids, cur_ft.output);
+            let sid = results
+                .get(&task_name)
+                .map(|r| r.session_id.clone())
+                .unwrap_or_default();
+            if sid.is_empty() {
+                continue;
+            }
+            let Ok(iwt_repo) = Repo::open(&iwt) else { break };
+            let Ok(prev_iwt_head) = iwt_repo.rev_parse("HEAD") else {
+                break;
+            };
+            let wt = &worktrees[&task_name];
+            let Ok(prev_wt_head) = repo.rev_parse(&format!("concord/{run_id}/{task_name}")) else {
+                continue;
+            };
+
+            // Bring the complete integrated tree into `wt` (conflict-free fast-forward
+            // since `prev_wt_head` is already an ancestor of `prev_iwt_head`).
+            let Ok(m_in) = Repo::merge_into(
+                wt,
+                &prev_iwt_head,
+                &format!("concord: bring integrated codebase into {task_name} for final verification"),
+            ) else {
+                continue;
+            };
+            if !m_in.clean {
+                continue;
+            }
+            {
+                let mut st = shared.lock().expect("state");
+                let peer_revs: BTreeMap<String, String> = st
+                    .agents
+                    .iter()
+                    .filter(|(n, _)| *n != &task_name)
+                    .filter_map(|(n, a)| st.repo.rev_parse(&a.branch).ok().map(|h| (n.clone(), h)))
+                    .collect();
+                if let Some(a) = st.agents.get_mut(&task_name) {
+                    a.base = prev_iwt_head.clone();
+                    a.status = Status::Running;
+                    a.check_failures = None;
+                    a.stats.check_blocks = 0;
+                    a.peer_check_blocks = 0;
+                    for (pn, ph) in peer_revs {
+                        a.merged_producers.insert(pn.clone());
+                        a.merged_revs.insert(pn, ph);
+                    }
+                }
+                st.log(
+                    "post_merge_resume",
+                    json!({ "agent": task_name, "failures": failing_ids.len().max(1) }),
+                );
+            }
+
+            let mut msg = format!(
+                "[concord] All parallel teammates' branches have now been integrated into your worktree, \
+                 so every teammate's feature is present and no failures are due to missing teammate code.\n\
+                 Your ticket's acceptance check (`{check_cmd}`) still has {} failing test(s):\n",
+                failing_ids.len().max(1)
+            );
+            for id in failing_ids.iter().take(20) {
+                msg.push_str(&format!("  {id}\n"));
+            }
+            msg.push_str(&format!(
+                "Assertion details:\n{}\n\
+                 Fix these remaining failure(s) carefully without breaking any teammate's tests, \
+                 run `{check_cmd}` to verify it passes, then finish.",
+                live::assertion_excerpt(&out_text, 35)
+            ));
+
+            eprintln!("  reconciling integrated acceptance check for {task_name}");
+            let r = spawn_agent(
+                cfg,
+                AgentCtx {
+                    name: &task_name,
+                    worktree: wt,
+                    settings: &settings_paths[&task_name],
+                    shared: &shared,
+                    addr: &addr,
+                },
+                &msg,
+                SessionArg::Resume(&sid),
+                &agents_dir,
+                cfg.resume_rounds + 1,
+            )?;
+            results.entry(task_name.clone()).or_default().resumed += 1;
+            wait_all(vec![r], &mut results, &shared)?;
+            let _ = Repo::commit_if_dirty(wt, &format!("agent {task_name}: post-integration reconciliation"));
+
+            let Ok(new_wt_head) = repo.rev_parse(&format!("concord/{run_id}/{task_name}")) else {
+                continue;
+            };
+            let merged_back = Repo::merge_into(
+                &iwt,
+                &new_wt_head,
+                &format!("concord: integrate post-merge fix from {task_name}"),
+            );
+            let improved = match merged_back {
+                Ok(m) if m.clean => {
+                    let (after_failures, _) = evaluate_task_checks(&check_targets, &iwt);
+                    if after_failures < cur_failures {
+                        cur_failures = after_failures;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if !improved {
+                let _ = iwt_repo.git(&["reset", "--hard", &prev_iwt_head]);
+                if let Ok(wt_repo) = Repo::open(wt) {
+                    let _ = wt_repo.git(&["reset", "--hard", &prev_wt_head]);
+                }
+            } else if let Ok(sha) = iwt_repo.rev_parse("HEAD") {
+                prefix_commits.push((task_name, sha));
+            }
+        }
+    }
+
+    for (name, wt) in &worktrees {
         let (ok, _) = run_tests(&cfg.test_cmd, wt);
         results.entry(name.clone()).or_default().tests_alone_passed = Some(ok);
     }
-
-    // Integrate in dependency order and run the full test suite.
-    let mut integration = Integration::default();
     {
         let st = shared.lock().expect("state");
-        integration.order = merge_order(&st);
         for (name, r) in results.iter_mut() {
             if let Some(a) = st.agents.get(name) {
                 r.notices_delivered = a.stats.notices_delivered;
@@ -837,31 +1189,13 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
             }
         }
     }
-    let iwt = run_dir.join("wt").join("_integration");
-    repo.worktree_add(&iwt, &format!("concord/{run_id}/integration"), &base)?;
-    for name in &integration.order {
-        let head = repo.rev_parse(&format!("concord/{run_id}/{name}"))?;
-        let msg = format!("integrate agent {name}");
-        let mut m = Repo::merge_into(&iwt, &head, &msg)?;
-        if !m.clean && cfg.regions {
-            // Region coherence leaves insert/insert collisions to integration:
-            // conflicts whose blocks are all pure insertions on both sides are
-            // combined (both kept whole, earlier agents first) and verified;
-            // any other conflict stays a conflict.
-            let files = m.conflicted_files.clone();
-            let u = Repo::merge_into_union(&iwt, &head, &msg, &files, false, &crate::regions::verify_union)?;
-            if u.clean {
-                integration.unions.insert(name.clone(), files);
-                m = u;
-            }
-        }
-        if !m.clean {
-            integration.conflicts.insert(name.clone(), m.conflicted_files);
-        }
-    }
     let (ok, tail) = run_tests(&cfg.test_cmd, &iwt);
     integration.tests_passed = ok && integration.conflicts.is_empty();
     integration.tests_output_tail = tail;
+    if !ok && integration.conflicts.is_empty() && prefix_commits.len() > 1 {
+        integration.bisected_culprit = crate::mrp::bisect_prefix_failure(&repo, &prefix_commits, &cfg.test_cmd);
+    }
+    let integrated_commit = Repo::open(&iwt).and_then(|r| r.rev_parse("HEAD")).ok();
 
     let agents: Vec<AgentResult> = results.into_values().collect();
     let report = RunReport {
@@ -877,8 +1211,17 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
     };
     beating.store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = std::fs::remove_file(&heartbeat);
+    let _ = std::fs::remove_file(run_dir.join("daemon.addr"));
     std::fs::write(run_dir.join("report.json"), serde_json::to_string_pretty(&report)?)?;
     std::fs::write(run_dir.join("report.md"), render(&report))?;
+    let mrp = crate::mrp::build_mrp_for_run(
+        &repo,
+        &report,
+        integrated_commit,
+        report.integration.bisected_culprit.clone(),
+    );
+    std::fs::write(run_dir.join("mrp.json"), serde_json::to_string_pretty(&mrp)?)?;
+    std::fs::write(run_dir.join("mrp.md"), crate::mrp::render_mrp_markdown(&mrp))?;
     Ok(report)
 }
 

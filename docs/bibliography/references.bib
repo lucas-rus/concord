@@ -448,20 +448,20 @@
   author       = {{Tree-sitter contributors}},
   title        = {Tree-sitter: an incremental parsing system for programming tools},
   howpublished = {\url{https://tree-sitter.github.io/tree-sitter/}},
-  note         = {Accessed: 2026-11-09},
+  note         = {Accessed: 2026-11-25},
   year         = {2026},
-  repository   = {https://github.com/tree-sitter/tree-sitter https://github.com/tree-sitter/tree-sitter-python https://github.com/tree-sitter/py-tree-sitter},
-  annote       = {Concord's language front-end (crate concord-lang). It parses Python into symbols, signatures, call sites and digests of contract vs. body.}
+  repository   = {https://github.com/tree-sitter/tree-sitter},
+  annote       = {Concord's language front-end (crate concord-lang) across Python, TypeScript/JavaScript, Rust, and Go, extracting symbols, signatures, call sites, and contract vs. body digests.}
 }
 
 @misc{mergiraf,
   author       = {{Mergiraf contributors}},
   title        = {Mergiraf: a syntax-aware git merge driver},
   howpublished = {\url{https://mergiraf.org}},
-  note         = {Accessed: 2026-11-09},
+  note         = {Accessed: 2026-11-25},
   year         = {2026},
-  repository   = {https://github.com/lucas-rus/concord},
-  annote       = {A structured, tree-sitter-based merge. A candidate to resolve Concord's symbol-disjoint textual conflicts automatically, instead of handing them to an agent.}
+  repository   = {https://codeberg.org/mergiraf/mergiraf},
+  annote       = {A structured, tree-sitter-based merge driver invoked out-of-process via --merge-driver to keep Concord's MIT/Apache-2.0 crates permissive.}
 }
 
 % ---- Repositories used or studied during development (not cited in the proposal) ----
@@ -518,4 +518,67 @@
   repository   = {https://github.com/Aider-AI/aider},
   note         = {Accessed: 2026-11-23},
   annote       = {Its repo map (tree-sitter tags + PageRank) is a model for ranking which call sites to show in Concord's notices.}
+}
+
+@misc{weave2026,
+  title        = {Weave: Entity-Level Semantic Merge Driver and {MCP} Coordination Server for {Git}},
+  author       = {{Ataraxy Labs}},
+  howpublished = {\url{https://github.com/Ataraxy-Labs/weave}},
+  repository   = {https://github.com/Ataraxy-Labs/weave},
+  year         = {2026},
+  note         = {Accessed: 2026-11-25},
+  annote       = {Tree-sitter entity-level merge driver with declared MCP entity claims. Contrasts with Concord's observed footprints, contract vs. body separation, cross-file call conformance checks, and finish gates.}
+}
+
+@misc{cork2026,
+  title        = {Cork: Collaborative Version Control for Parallel {AI} Agents},
+  author       = {{Cork Technology}},
+  howpublished = {\url{https://github.com/Cork-Technology/cork-cli}},
+  repository   = {https://github.com/Cork-Technology/cork-cli},
+  year         = {2026},
+  note         = {Accessed: 2026-11-25},
+  annote       = {Agent-first collaborative VCS layer; contrasts with Concord's drop-in Git worktree + MCP architecture.}
+}
+
+@misc{li2026aidev2,
+  author       = {Hao Li and Haoxiang Zhang and Ahmed E. Hassan},
+  title        = {{AIDev}: Studying {AI} Coding Agents on {GitHub}},
+  year         = {2026},
+  howpublished = {arXiv preprint \href{https://arxiv.org/abs/2602.09185}{arXiv:2602.09185}},
+  url          = {https://arxiv.org/abs/2602.09185},
+  annote       = {Expanded 932,791-PR AIDev dataset across Claude Code, OpenAI Codex, Devin, GitHub Copilot, and Cursor.}
+}
+
+@misc{hasan2026mcpsmells,
+  author       = {Mohammed Mehedi Hasan and Hao Li and Emad Fallahzadeh and Gopi Krishnan Rajbahadur and Bram Adams and Ahmed E. Hassan},
+  title        = {Model Context Protocol ({MCP}) Tool Descriptions Are Smelly! {Towards} Improving {AI} Agent Efficiency with Augmented {MCP} Tool Descriptions},
+  year         = {2026},
+  howpublished = {arXiv preprint \href{https://arxiv.org/abs/2602.14878}{arXiv:2602.14878}},
+  url          = {https://arxiv.org/abs/2602.14878},
+  annote       = {Guides Concord's concise, non-smelly MCP tool schemas and contract-only symbol outputs.}
+}
+
+@article{hasan2026mcpsecurity,
+  author       = {Mohammed Mehedi Hasan and Hao Li and Emad Fallahzadeh and Gopi Krishnan Rajbahadur and Bram Adams and Ahmed E. Hassan},
+  title        = {Model Context Protocol ({MCP}) at First Glance: Studying the Security and Maintainability of {MCP} Servers},
+  journal      = {ACM Transactions on Software Engineering and Methodology},
+  year         = {2026},
+  note         = {\href{https://doi.org/10.1145/3814959}{doi:10.1145/3814959}},
+  annote       = {Informs Concord's local-only MCP transport, worktree isolation, and zero-mutation inspection tools.}
+}
+
+@inproceedings{zhang2025failureattribution,
+  author       = {Shaokun Zhang and Ming Yin and Jieyu Zhang and Jiale Liu and Zhiguang Han and Jingyang Zhang and Beibin Li and Chi Wang and Huazheng Wang and Yiran Chen and Qingyun Wu},
+  title        = {Which Agent Causes Task Failures and When? {On} Automated Failure Attribution of {LLM} Multi-Agent Systems},
+  booktitle    = {Proceedings of the 42nd International Conference on Machine Learning (ICML)},
+  year         = {2025},
+  annote       = {Theoretical grounding for Concord's O(log k) peer-bisection attribution in fails-together and batch-and-bisect integration.}
+}
+
+@misc{tu2026agenticverification,
+  author       = {Haoxin Tu and振宇 Zhang and Ahmed E. Hassan and others},
+  title        = {Towards Understanding Verification of Agentic Coding},
+  year         = {2026},
+  howpublished = {arXiv preprint (cited in Hassan et al., 2026)},
+  annote       = {Grounds Concord's multi-layered verification loop (contract conformance + fails-together + SASE Merge-Readiness Packs).}
 }

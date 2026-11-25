@@ -22,12 +22,22 @@ try {
 }
 
 // OpenCode tool name -> Claude Code tool name understood by the daemon.
-const TOOLS = { read: "Read", edit: "Edit", write: "Write", patch: "Edit", multiedit: "MultiEdit", bash: "Bash" };
+const TOOLS = {
+  read: "Read",
+  grep: "Grep",
+  edit: "Edit",
+  write: "Write",
+  patch: "Edit",
+  multiedit: "MultiEdit",
+  bash: "Bash",
+};
 
 function toolInput(tool, input) {
   const raw = input?.filePath ?? input?.file_path ?? input?.path;
   const out = {};
   if (typeof raw === "string") out.file_path = isAbsolute(raw) ? raw : join(settings.worktree, raw);
+  if (typeof input?.pattern === "string") out.pattern = input.pattern;
+  else if (typeof input?.query === "string") out.pattern = input.query;
   if (Number.isInteger(input?.offset)) out.offset = input.offset;
   if (Number.isInteger(input?.limit)) out.limit = input.limit;
   return out;

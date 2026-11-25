@@ -1,16 +1,22 @@
 ---
 name: concord-team
-description: Split a larger piece of work into parallel tickets and have a team of coding agents implement them at the same time with Concord, then merge the integrated result. Use when the user asks to parallelise work, run several agents at once, or build several features simultaneously.
+description: Coordinate parallel AI coding agents and contract-verified merges on a git repository using Concord. Use when splitting features across parallel agents, inspecting symbol contracts without reading whole files, checking live git worktrees, or merging branches safely at the contract level.
 ---
 
-# Running a coordinated agent team with Concord
+# Contract-Level Parallel Coordination & Merging with Concord
 
-Concord's MCP tools start a team of coding agents that work in parallel on this repository, each in its own git worktree, and coordinate them while they work: an agent is told when another agent changes a function signature it uses, and when it finishes, finished teammates' overlapping work is merged into its worktree so that it resolves the conflict itself. At the end, all branches are merged into one integration branch and the tests run on it.
+Concord operates at the **symbol/contract level** (functions, methods, classes/structs/traits/interfaces, types) across Python, TypeScript/JavaScript, Rust, and Go rather than raw files or line numbers.
 
-1. **Make sure the work is committed.** The agents start from a commit (default `HEAD`); uncommitted changes are invisible to them.
-2. **Write the tickets.** One feature per ticket, each self-contained: what to build, in which files or modules, the exact API (function names, signatures, return types), and how to test it. Tickets may touch the same code; Concord handles that. Do not mention the other agents.
-3. **Start the team** with `concord_run`: `tasks` (a list of `{name, prompt}`), and `test_cmd`, the command that tests the whole project (e.g. `python -m pytest -q`).
-4. **Follow progress** with `concord_status` every few minutes; a team typically needs 5-15 minutes.
-5. **Get the result** with `concord_result`. Report to the user which tickets succeeded, whether the integrated tests pass, and the integration branch. Suggest `git merge <branch>`; do not merge without the user's approval.
+## 1. Direct Contract Inspection & Smart Merge Tools
+- **`concord_symbols`**: Inspect symbol signatures and line spans in files or directories without dumping function bodies (~10x fewer tokens than reading whole files).
+- **`concord_diff_contracts`**: Compare two git revisions (or `HEAD` vs uncommitted working tree) at the contract level, highlighting breaking vs. compatible signature changes and affected callers.
+- **`concord_worktrees`**: Inspect all active `git worktree` checkouts in memory (including uncommitted edits) for cross-worktree contract violations, duplicate definitions, and auto-unionable insertions.
+- **`concord_analyze`**: Offline contract, duplicate-symbol, and textual conflict check across two or more git branches.
+- **`concord_smart_merge`**: Merge branches in contract-dependency order (producers before consumers), automatically resolving verified pure two-sided insertions, checking post-merge AST call conformance, and bisecting test failures.
+- **`concord_negotiate` / `concord_ack`**: Negotiate a leased symbol's signature with its live owner or explicitly acknowledge a peer's contract update.
 
-To check existing branches (for example from pull requests) for conflicts and broken function contracts without running agents, use `concord_analyze`.
+## 2. Launching a Coordinated Parallel Agent Team
+1. **Commit base state**: Agents branch from `HEAD` (or `base`); uncommitted changes are not inherited.
+2. **Write self-contained tickets**: One feature per ticket (`{name, prompt, check?}`), specifying target modules, exact public signatures, and how to test. Tickets may touch the same files—Concord coordinates contract changes and region overlaps automatically.
+3. **Start the team** with `concord_run` (default `coordination: "regions"` combines contract coherence + region coherence + verified insertion union).
+4. **Monitor progress** with `concord_status` and **retrieve the integrated branch + SASE Merge-Readiness Pack (MRP)** with `concord_result`. Ask user approval before merging the integration branch into their working branch.
