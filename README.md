@@ -5,7 +5,7 @@
 [![CI](https://github.com/lucas-rus/concord/actions/workflows/ci.yml/badge.svg)](https://github.com/lucas-rus/concord/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work. It is the subject of a Bachelor thesis at the Faculty of Computer Science, West University of Timișoara (supervisor: Dr. Adrian Spătaru).
+Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work.
 
 > **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, and Go** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), live `git worktree` inspector (`concord worktrees`), contract-verified smart merge (`concord merge`), SASE Merge-Readiness Packs (`concord mrp`), and an 11-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md).
 
