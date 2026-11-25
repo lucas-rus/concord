@@ -6,6 +6,7 @@
 //! Rust ([`rust_lang`]), and Go ([`go_lang`]); [`index_file`] picks the
 //! front-end by file extension.
 
+pub mod cpp_lang;
 pub mod go_lang;
 pub mod python;
 pub mod rust_lang;
@@ -67,6 +68,7 @@ pub fn is_supported_path(path: &str) -> bool {
         || typescript::is_typescript_path(path)
         || rust_lang::is_rust_path(path)
         || go_lang::is_go_path(path)
+        || cpp_lang::is_cpp_path(path)
         || schema::is_schema_path(path)
 }
 
@@ -88,6 +90,8 @@ pub fn is_test_path(path: &str) -> bool {
         || file.ends_with("_test.py")
         || file.ends_with("_test.go")
         || file.ends_with("_test.rs")
+        || file.ends_with("_test.cpp")
+        || file.ends_with("_test.cc")
         || file.contains(".test.")
         || file.contains(".spec.")
 }
@@ -102,6 +106,8 @@ pub fn index_file(path: &str, source: &str) -> Option<Result<FileIndex, LangErro
         Some(rust_lang::index_file(path, source))
     } else if go_lang::is_go_path(path) {
         Some(go_lang::index_file(path, source))
+    } else if cpp_lang::is_cpp_path(path) {
+        Some(cpp_lang::index_file(path, source))
     } else if schema::is_schema_path(path) {
         Some(schema::index_file(path, source))
     } else {
@@ -229,7 +235,8 @@ impl RepoIndex {
         let is_ts = typescript::is_typescript_path(&file.path);
         let is_rs = rust_lang::is_rust_path(&file.path);
         let is_go = go_lang::is_go_path(&file.path);
-        let is_receiver = if is_ts {
+        let is_cpp = cpp_lang::is_cpp_path(&file.path);
+        let is_receiver = if is_ts || is_cpp {
             head == "this"
         } else if is_rs {
             head == "self" || head == "Self"

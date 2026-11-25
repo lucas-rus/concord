@@ -7,7 +7,7 @@
 
 Concord is an orchestration engine for running several AI coding agents (Claude Code, OpenCode, ...) **at the same time on the same repository** without them silently breaking each other's work.
 
-> **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, and Go** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), live `git worktree` inspector (`concord worktrees`), contract-verified smart merge (`concord merge`), SASE Merge-Readiness Packs (`concord mrp`), and an 11-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md).
+> **Status:** working end-to-end CLI & MCP server across **Python, TypeScript/JavaScript, Rust, Go, C/C++, and schemas (SQL, Prisma, Protobuf, OpenAPI)** — symbol/contract engine, live contract + region coherence daemon (`concord run` for Claude Code and OpenCode), conflict-aware task planner (`concord plan`), live `git worktree` inspector (`concord worktrees`), contract-verified smart merge (`concord merge --type-check`), SASE Merge-Readiness Packs (`concord mrp`), and a 12-tool MCP server (`concord mcp`). See the [roadmap](docs/roadmap.md).
 
 ## Results with real agents
 
@@ -224,7 +224,7 @@ flowchart LR
 | [`concord-git`](crates/concord-git) | Git plumbing: tree reading, in-memory `merge-tree`, patience/diff3 verified insertion-union, worktree snapshots & listing | ✅ Complete |
 | [`concord-cli`](crates/concord-cli) | `concord` binary: `symbols`, `diff`, `analyze`, `worktrees`, `merge`, `mrp`, `run`, `watch`, `mcp` (11 MCP tools + live TCP daemon) | ✅ Complete |
 
-**Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), and **Go** (`.go`) — all four languages of [CooperBench](https://github.com/cooperbench/CooperBench) and the top autonomous-agent languages on GitHub ([AIDev](https://arxiv.org/abs/2507.15003)). Files in other languages still participate in textual/structural merge checks and file-existence guards.
+**Languages.** Concord's symbol and contract engine covers **Python** (`.py`, `.pyi`), **TypeScript/JavaScript** (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, including `@/...` and `~/...` tsconfig root path aliases), **Rust** (`.rs`), **Go** (`.go`), **C/C++** (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`), and **schema/API contracts** (`.sql`, `.prisma`, `.proto`, OpenAPI `.json`/`.yaml`). Files in other languages still participate in textual/structural merge checks and file-existence guards.
 
 Design: [docs/design.md](docs/design.md) · Tech stack and decisions: [docs/tech-stack.md](docs/tech-stack.md) · Related work: [docs/research/related-work.md](docs/research/related-work.md) · Evaluation plan: [eval/README.md](eval/README.md)
 
