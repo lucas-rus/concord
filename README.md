@@ -9,7 +9,7 @@
   <a href="https://github.com/lucas-rus/concord/releases/latest"><img src="https://img.shields.io/github/v/release/lucas-rus/concord?color=38bdf8&label=release" alt="Latest Release" /></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-818cf8.svg" alt="License" /></a>
   <a href="#install-and-use-it-from-your-agent-mcp"><img src="https://img.shields.io/badge/MCP-12%20tools-34d399.svg" alt="12 MCP Tools" /></a>
-  <a href="#benchmark-results"><img src="https://img.shields.io/badge/CommonMark-652%2F652%20(5.0x)-10b981.svg" alt="CommonMark 652/652" /></a>
+  <a href="#benchmark-results"><img src="https://img.shields.io/badge/CommonMark-652%2F652%20(3.1x)-10b981.svg" alt="CommonMark 652/652" /></a>
   <a href="#benchmark-results"><img src="https://img.shields.io/badge/Dispecerat%20TS-48%2F48%20(2.2x)-10b981.svg" alt="Dispecerat 48/48" /></a>
 </p>
 
@@ -29,7 +29,7 @@
 **Concord** is an orchestration engine and MCP server for running multiple AI coding agents (OpenCode, Claude Code, Cursor, ...) **at the same time on the same repository** without them silently breaking each other's work.
 
 > [!NOTE]
-> **Jump straight to the [Benchmark Results & Tests below](#benchmark-results):** **652/652 (100.0%)** on 12-agent Python CommonMark (`5.0×` speedup, `0` conflicts) and **48/48 (100.0%)** on 6-agent TypeScript `dispecerat` (`2.20×` speedup, `0` conflicts, zero per-ticket test hints).
+> **Jump straight to the [Benchmark Results & Tests below](#benchmark-results):** **652/652 in all 5 runs** on 12-agent Python CommonMark (`3.1×` faster than one agent, `1.6×` faster than an AI integrator, `0` conflicts) and **48/48 (100.0%)** on 6-agent TypeScript `dispecerat` (`2.20×` speedup, `0` conflicts, zero per-ticket test hints).
 
 ### Highlights
 
@@ -104,18 +104,21 @@ Files are the wrong unit of coordination. Agents break each other through **cont
 
 ### 1. Python — 12 Agents Building a Full CommonMark 0.31.2 Parser ([`concord-bench`](https://github.com/lucas-rus/concord-bench))
 
-Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite:
+Twelve parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement all sections of the CommonMark 0.31.2 Markdown→HTML specification from a minimal paragraph-only scaffold, judged by the official **652-example** CommonMark specification suite. Main study (pre-registered in [PROTOCOL.md](https://github.com/lucas-rus/concord-bench/blob/main/PROTOCOL.md)): `opencode-go/hy4-flash-free`, runs interleaved by round, mean ± SD over n valid runs. Full report with bootstrap CIs, tests and figures: [`concord-bench/results/hy4m`](https://github.com/lucas-rus/concord-bench/blob/main/results/hy4m/report/report.md).
 
-| Condition | Spec examples passed (of 652) | Integration loss | Merge conflicts | Wall-clock time |
-|---|---|---|---|---|
-| `sequential` (1 agent, ticket-by-ticket) | 645 / 652 (98.9%) | 0 | 0 | 157.1 min (1.0×) |
-| `parallel-off` (12 agents, uncoordinated) | 374 / 652 (57.4%) | 268 | 9 / 12 branches | 29.0 min |
-| `parallel-integrator` (12 agents + AI integrator) | 643 / 652 (98.6%) | 15 | 0 (resolved by 13th agent) | 56.3 min (2.8×) |
-| **`Concord` (`--mode enforce --regions`)** | **652 / 652 (100.0%)** | **0** | **0 / 12 branches** | **31.7 min (5.0×)** |
+| Condition | n | Spec examples passed (of 652) | Integration loss | Merge conflicts (of 12 branches) | Wall-clock time |
+|---|---|---|---|---|---|
+| `sequential` (1 agent, ticket by ticket) | 5 | 651.2 ± 0.8 (650–652) | 0 | 0 | 65.1 ± 5.9 min (1.0×) |
+| `parallel-off` (12 agents, uncoordinated) | 5 | 199.0 ± 30.1 (161–236) | 301.8 ± 45.8 | 9.0 ± 1.4 | 13.7 ± 1.9 min |
+| `parallel-integrator` (12 agents + 13th integrator agent) | 5 | 652 in every run | 0 | 9.4 ± 1.1, resolved by the integrator | 34.2 ± 4.8 min (1.9×) |
+| Concord, peer merge (`parallel-concord`: `--mode enforce --peer-merge`) | 3 | 652 in every run | 0 | 0 | 27.1 ± 3.5 min (2.4×) |
+| **Concord, region coherence (`parallel-regions`: `--mode enforce --regions`)** | **5** | **652 in every run** | **0** | **0** | **20.8 ± 1.9 min (3.1×)** |
+
+Pre-registered tests (Mann–Whitney U, Holm-corrected, Cliff's δ), region coherence vs: `parallel-off` on examples passed (H1) and integration loss (H2), and `sequential` on wall time (H3): δ = ±1.00, p = 0.03 each. Exploratory: region coherence is faster than the integrator in every pairing (δ = −1.00, p = 0.008, uncorrected). A replication with `opencode-go/deepseek-v4.1-flash` (n = 3 per condition) is running.
 
 ### 2. TypeScript 5 (`strict`) — 6 Agents Building `dispecerat` with Zero Per-Ticket Test Hints ([`concord-bench`](https://github.com/lucas-rus/concord-bench))
 
-Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
+Exploratory, n = 1 per condition (rescored after a fix to the evaluator's fixtures, see [PROTOCOL.md](https://github.com/lucas-rus/concord-bench/blob/main/PROTOCOL.md)). Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled features sharing `lib/types.ts`, `DemoBackend`, and `@/lib/...` tsconfig aliases with **no pre-written feature tests** and **no per-ticket `check` commands** (only `--test-cmd ./scripts/run-tests.sh`), judged by a held-out **48-test** suite (42 per-ticket + 6 cross-ticket runtime synergy tests):
 
 | Condition | Held-out spec (of 48) | Cross-ticket synergy | Integration loss | Merge conflicts | Wall-clock time |
 |---|---|---|---|---|---|
@@ -124,7 +127,6 @@ Six parallel OpenCode agents (`opencode-go/hy4-flash-free`) implement coupled fe
 | `parallel-fileleases` (6 agents, file locks) | 14 / 48 (29.2%) | 0 / 6 | 25 | 4 / 6 | 7.7 min |
 | `parallel-integrator` (6 agents + 7th integrator) | 48 / 48 (100.0%) | 6 / 6 | 0 | 0 / 6 (7th agent) | 11.7 min (1.13×) |
 | **`Concord` (`--mode enforce --regions`)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **6.0 min (2.20×)** |
-| **`Orchestrator + Concord` (autonomous MCP split)** | **48 / 48 (100.0%)** | **6 / 6** | **0** | **0 / 6** | **8.6 min (team)** |
 
 ---
 
