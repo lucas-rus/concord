@@ -534,3 +534,50 @@ fn lean_hand_off_that_breaks_a_test_gets_a_turn() {
     let reason = decision.expect("turn");
     assert!(reason.contains("passed before the merge and fail now"), "{reason}");
 }
+
+/// Lean gate, early release: an owner that waits at its own finish gate hands
+/// its regions to the agent waiting on it at once, instead of after it
+/// finishes, so wait chains do not run one agent after another.
+#[test]
+fn lean_early_release_breaks_wait_chains() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(repo.clone(), base.clone(), Mode::Enforce, None, Duration::from_secs(5)).unwrap();
+    st.regions = true;
+    st.lean = true;
+    let mut wts = Vec::new();
+    for name in ["owner", "yielder", "other"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let (owner_wt, yielder_wt) = (&wts[0], &wts[1]);
+    edit(&shared, "owner", owner_wt, &BASE.replace("return 1", "return 10"));
+    let out = edit(&shared, "yielder", yielder_wt, &BASE.replace("return 1", "return 11"));
+    assert!(out.contains("region conflict"), "{out}");
+    edit(&shared, "yielder", yielder_wt, BASE);
+    // The owner is at its own finish gate, waiting for a third agent.
+    shared
+        .lock()
+        .unwrap()
+        .waiting
+        .insert("owner".into(), ["other".to_string()].into_iter().collect());
+    let t0 = std::time::Instant::now();
+    let reason = stop(&shared, "yielder").expect("hand-off");
+    assert!(t0.elapsed() < Duration::from_secs(2), "waited {:?}", t0.elapsed());
+    assert!(reason.contains("merged their finished work"), "{reason}");
+    assert!(
+        fs::read_to_string(yielder_wt.join("m.py"))
+            .unwrap()
+            .contains("return 10")
+    );
+}

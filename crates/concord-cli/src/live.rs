@@ -168,7 +168,7 @@ pub struct State {
     /// Waits-for graph of the finish gate, across the contract and region
     /// layers: agent -> agents it is currently waiting for. A wait that would
     /// close a cycle is never entered (no cross-layer deadlock).
-    pub(crate) waiting: BTreeMap<String, BTreeSet<String>>,
+    pub waiting: BTreeMap<String, BTreeSet<String>>,
     /// Active whole-file exclusive leases (`file -> owner`) for Baseline B3.
     pub(crate) file_owners: BTreeMap<String, String>,
     /// Passive overlap alerts already sent (`(agent, peer, file)`) for Baseline B4.
