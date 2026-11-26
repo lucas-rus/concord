@@ -283,8 +283,15 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
         (false, None, Some(idle)) if idle > STALE_SECS => format!("no events for {} min: stopped?", idle / 60),
         _ => "running".to_owned(),
     };
-    // The run's clock now, to tell how long each agent has been quiet.
+    // The run's clock now, to tell how long each agent has been quiet. It
+    // keeps ticking between events (and before the first one) while the run
+    // is alive.
     let now = st.elapsed + st.idle.unwrap_or(0) as f64;
+    let clock = if st.done || st.heartbeat.is_some_and(|hb| hb > HEARTBEAT_STALE) {
+        st.elapsed
+    } else {
+        now
+    };
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -293,7 +300,7 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
         title,
         finished,
         st.agents.len(),
-        paint("2", &format!("{} · {status}", mmss(st.elapsed)))
+        paint("2", &format!("{} · {status}", mmss(clock)))
     );
     let width = st.agents.keys().map(String::len).max().unwrap_or(5).max(5);
     let mut gone: Vec<String> = Vec::new();
@@ -515,6 +522,17 @@ mod tests {
         let st = fold(&[r#"{"t":1.0,"event":"wait","data":{"agent":"c","for":["a","b"]}}"#]);
         let screen = render(&st, "run", false);
         assert!(screen.contains("waiting for a, b (contract)"), "{screen}");
+    }
+
+    #[test]
+    fn the_clock_ticks_between_events_while_the_run_lives() {
+        let mut st = fold(&[r#"{"t":60.0,"event":"footprint","data":{"agent":"a"}}"#]);
+        st.heartbeat = Some(2);
+        st.idle = Some(200);
+        assert!(render(&st, "run", false).contains("04:20 · running"));
+        // A dead run's clock stops at its last event.
+        st.heartbeat = Some(600);
+        assert!(render(&st, "run", false).contains("01:00 · Concord is not running"));
     }
 
     #[test]
