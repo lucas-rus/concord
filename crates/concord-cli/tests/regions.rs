@@ -463,3 +463,74 @@ fn an_owner_that_exited_is_handed_over_not_waited_for() {
     );
     assert_eq!(stop(&shared, "yielder"), None);
 }
+
+/// Two agents append at the same place; the yielder finishes first, so the
+/// owner receives a combined hand-off. Returns the owner's gate decision and
+/// its merged file.
+fn lean_scenario(lean: bool, owner_check: &str) -> (Option<String>, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        None,
+        Duration::from_millis(500),
+    )
+    .unwrap();
+    st.regions = true;
+    st.lean = lean;
+    let mut wts = Vec::new();
+    for name in ["owner", "yielder"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    st.agents.get_mut("owner").unwrap().check = Some(owner_check.to_owned());
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let (owner_wt, yielder_wt) = (&wts[0], &wts[1]);
+    edit(
+        &shared,
+        "owner",
+        owner_wt,
+        &format!("{BASE}\n\ndef c():\n    return 3\n"),
+    );
+    edit(
+        &shared,
+        "yielder",
+        yielder_wt,
+        &format!("{BASE}\n\ndef d():\n    return 4\n"),
+    );
+    assert_eq!(stop(&shared, "yielder"), None);
+    let decision = stop(&shared, "owner");
+    (decision, fs::read_to_string(owner_wt.join("m.py")).unwrap())
+}
+
+/// Lean gate: a hand-off that breaks none of the agent's checked tests is
+/// merged and verified without an agent turn.
+#[test]
+fn lean_hand_off_that_breaks_nothing_needs_no_turn() {
+    let (decision, merged) = lean_scenario(true, "grep -q 'def c' m.py");
+    assert_eq!(decision, None, "no turn expected");
+    assert!(merged.contains("def c():") && merged.contains("def d():"), "{merged}");
+    // Without lean, the same hand-off costs the agent a turn.
+    let (decision, _) = lean_scenario(false, "grep -q 'def c' m.py");
+    assert!(decision.expect("turn").contains("both additions are kept"));
+}
+
+/// Lean gate: a hand-off that breaks a test that passed before gives the
+/// agent a turn, naming what broke.
+#[test]
+fn lean_hand_off_that_breaks_a_test_gets_a_turn() {
+    let (decision, _) = lean_scenario(true, "! grep -q 'def d' m.py");
+    let reason = decision.expect("turn");
+    assert!(reason.contains("passed before the merge and fail now"), "{reason}");
+}

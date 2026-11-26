@@ -311,6 +311,17 @@ pub fn after_edit(st: &mut State, agent: &str) {
     }
 }
 
+/// A hand-off just merged into an agent's worktree.
+pub struct Handoff {
+    /// The message for the agent.
+    pub text: String,
+    /// The agent's commit just before the first merge of the batch.
+    pub before: Option<String>,
+    /// The agent had yielded lines to one of these owners, so it may still
+    /// have to rewrite them on top of the owner's version.
+    pub yielded: bool,
+}
+
 /// Outcome of the region part of the finish gate.
 pub enum Gate {
     Clear,
@@ -318,7 +329,7 @@ pub enum Gate {
     Wait(Vec<String>, String),
     Block(String),
     /// Finished owners' work was handed over: progress, not a liveness block.
-    Handoff(String),
+    Handoff(Handoff),
 }
 
 /// The region part of the finish gate for `agent` (write-set validation).
@@ -426,6 +437,8 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     // unions never conflict or leak unmerged state.
     let mut handed = Vec::new();
     let mut combined = false;
+    let mut before: Option<String> = None;
+    let mut yielded_any = false;
     for (peer, head, initial_union) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
         if (!yielded && initial_union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
@@ -444,6 +457,9 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
                 a.merged_revs.insert(peer, head);
             }
             continue;
+        }
+        if before.is_none() && !cur_wt.is_empty() {
+            before = Some(cur_wt.clone());
         }
         let msg = format!("concord: hand-off of {peer}'s regions to {agent}");
         let mut used_union = false;
@@ -469,6 +485,7 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
                     json!({ "agent": agent, "owner": peer, "combined": used_union }),
                 );
                 combined |= used_union;
+                yielded_any |= yielded;
                 handed.push(format!("`{peer}`"));
             }
             Ok(m) => {
@@ -506,12 +523,16 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
         } else {
             "The merges were clean: you had left their lines alone."
         };
-        return Gate::Handoff(format!(
-            "[concord] {} finished, and Concord merged their finished work into your worktree. {how} If your \
-             feature needs to change the lines they own, do it now, on top of their version. Run the tests and \
-             finish.",
-            handed.join(", ")
-        ));
+        return Gate::Handoff(Handoff {
+            text: format!(
+                "[concord] {} finished, and Concord merged their finished work into your worktree. {how} If your \
+                 feature needs to change the lines they own, do it now, on top of their version. Run the tests and \
+                 finish.",
+                handed.join(", ")
+            ),
+            before,
+            yielded: yielded_any,
+        });
     }
     if owners.is_empty() {
         Gate::Clear

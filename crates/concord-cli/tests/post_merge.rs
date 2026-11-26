@@ -86,6 +86,7 @@ fn every_ticket_failing_after_integration_is_repaired() {
         publish_debounce: Duration::from_millis(0),
         speculative_secs: None,
         fails_together: false,
+        lean: false,
         merge_driver: None,
         resume_rounds: 1,
         claude: agent.to_string_lossy().into_owned(),

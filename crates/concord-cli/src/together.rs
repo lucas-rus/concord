@@ -133,7 +133,7 @@ fn run_in(cmd: &str, dir: &Path) -> (bool, String) {
 }
 
 /// Run the tests at `rev` in a temporary detached worktree.
-fn test_at(repo: &Repo, rev: &str, cmd: &str) -> Result<(bool, String), String> {
+pub(crate) fn test_at(repo: &Repo, rev: &str, cmd: &str) -> Result<(bool, String), String> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir: PathBuf = std::env::temp_dir().join(format!(
         "concord-together-{}-{}",

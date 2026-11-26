@@ -217,6 +217,12 @@ enum Command {
         /// together but pass alone (with O(log k) peer bisection).
         #[arg(long)]
         fails_together: bool,
+        /// Lean gate (enforce mode): hand-offs that break none of the agent's
+        /// acceptance-check tests happen without an agent turn, and the check
+        /// sends an agent back at most once; the repair pass after
+        /// integration covers what is left. Saves turns and tokens.
+        #[arg(long)]
+        lean: bool,
         /// Structured merge driver for merges and conflict checks, e.g. `mergiraf`.
         #[arg(long)]
         merge_driver: Option<String>,
@@ -457,6 +463,7 @@ fn main() -> Result<()> {
             publish_debounce_ms,
             speculative_secs,
             fails_together,
+            lean,
             merge_driver,
             resume_rounds,
             claude,
@@ -516,6 +523,7 @@ fn main() -> Result<()> {
                     publish_debounce: Duration::from_millis(publish_debounce_ms),
                     speculative_secs,
                     fails_together,
+                    lean,
                     merge_driver: merge_driver.clone(),
                     resume_rounds,
                     claude: claude.clone(),

@@ -177,6 +177,9 @@ pub struct State {
     pub(crate) structural_alerted: BTreeSet<(String, String, String)>,
     /// Fails-together check at the finish gate: the test command, if enabled.
     pub together: Option<String>,
+    /// Lean gate (enforce mode): silent hand-offs when the merge breaks none
+    /// of the agent's acceptance-check tests, and at most one check block.
+    pub lean: bool,
     /// Last fails-together verdict per agent, keyed by (snapshot, peers).
     together_cache: HashMap<String, (String, crate::together::Verdict)>,
     revisions: HashMap<String, Arc<Snapshot>>,
@@ -221,6 +224,7 @@ impl State {
             overlap_alerted: BTreeSet::new(),
             structural_alerted: BTreeSet::new(),
             together: None,
+            lean: false,
             together_cache: HashMap::new(),
             revisions: HashMap::new(),
             log,
@@ -1043,6 +1047,97 @@ pub fn assertion_excerpt(text: &str, max_lines: usize) -> String {
     picked.into_iter().take(max_lines).collect::<Vec<_>>().join("\n")
 }
 
+/// What a lean hand-off needs from the agent.
+enum LeanHandoff {
+    /// The merge broke none of the agent's checked tests: no turn.
+    Silent,
+    /// The agent must look: the message to append to the hand-off text.
+    Turn(String),
+}
+
+/// Lean hand-off: run the agent's acceptance check before and after the
+/// merge. Silent when it passes, or when the merge broke nothing that passed
+/// before and the agent has no yielded lines to rewrite.
+fn lean_handoff<'a>(
+    shared: &'a Shared,
+    st: std::sync::MutexGuard<'a, State>,
+    agent: &str,
+    h: &crate::regions::Handoff,
+) -> (std::sync::MutexGuard<'a, State>, LeanHandoff) {
+    let Some(a) = st.agents.get(agent) else {
+        return (st, LeanHandoff::Turn(String::new()));
+    };
+    let (Some(cmd), Some(before)) = (a.check.clone(), h.before.clone()) else {
+        return (st, LeanHandoff::Turn(String::new()));
+    };
+    let (wt, repo) = (a.worktree.clone(), st.repo.clone());
+    drop(st);
+    let run = |dir: &Path| {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(dir)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output()
+            .map(|o| {
+                let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
+                t.push_str(&String::from_utf8_lossy(&o.stderr));
+                (o.status.success(), t)
+            })
+    };
+    let after = run(&wt);
+    let prior = crate::together::test_at(&repo, &before, &cmd);
+    let mut st = shared.lock().expect("state");
+    let (Ok((after_ok, after_text)), Ok((before_ok, before_text))) = (after, prior) else {
+        return (st, LeanHandoff::Turn(String::new()));
+    };
+    let after_fail = crate::together::failing_tests(&after_text);
+    let before_fail = crate::together::failing_tests(&before_text);
+    // Tests that passed before the merge and fail after it.
+    let broken: Vec<String> = if after_ok {
+        Vec::new()
+    } else if after_fail.is_empty() || (!before_ok && before_fail.is_empty()) {
+        // Unparseable output: compare pass/fail of the whole check.
+        if before_ok {
+            vec![format!("`{cmd}`")]
+        } else {
+            Vec::new()
+        }
+    } else {
+        after_fail.difference(&before_fail).cloned().collect()
+    };
+    let silent = after_ok || (broken.is_empty() && !h.yielded);
+    if let Some(a) = st.agents.get_mut(agent) {
+        a.check_baseline = Some((after_ok, after_fail.clone()));
+        if silent {
+            // The check result after the hand-off is the new reference; the
+            // agent is not sent back for failures the merge did not cause.
+            a.check_failures = Some(after_fail.len().max(usize::from(!after_ok)));
+        } else {
+            a.check_failures = None;
+        }
+    }
+    st.log(
+        "region_handoff_verified",
+        json!({ "agent": agent, "silent": silent, "check_passed": after_ok, "broken": broken.len(), "yielded": h.yielded }),
+    );
+    if silent {
+        return (st, LeanHandoff::Silent);
+    }
+    let mut extra = String::new();
+    if !broken.is_empty() {
+        extra.push_str("\nConcord ran your acceptance check: these tests passed before the merge and fail now:\n");
+        for t in broken.iter().take(20) {
+            extra.push_str(&format!("  {t}\n"));
+        }
+        extra.push_str(&format!(
+            "Assertion details:\n{}\nFix only these; the merge is otherwise verified.",
+            assertion_excerpt(&after_text, 30)
+        ));
+    }
+    (st, LeanHandoff::Turn(extra))
+}
+
 /// The ticket's acceptance check at the finish gate.
 fn check_gate<'a>(
     shared: &'a Shared,
@@ -1091,7 +1186,12 @@ fn check_gate<'a>(
         .map(|a| (a.stats.check_blocks, a.check_failures))
         .unwrap_or((0, None));
     let progressing = prev.is_none_or(|p| failures < p);
-    if blocks >= MAX_CHECK_BLOCKS || !progressing {
+    let max_blocks = if st.lean && st.mode == Mode::Enforce {
+        1
+    } else {
+        MAX_CHECK_BLOCKS
+    };
+    if blocks >= max_blocks || !progressing {
         if let Some(a) = st.agents.get_mut(agent) {
             a.check_baseline = Some((false, failing));
         }
@@ -1523,7 +1623,30 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
                     // progress, so it does not count toward MAX_GATE_BLOCKS.
                     // Reset `check_failures` because the worktree just received
                     // a peer's code, so the next check evaluates a new codebase.
-                    crate::regions::Gate::Handoff(text) => {
+                    crate::regions::Gate::Handoff(h) => {
+                        let text = h.text.clone();
+                        // Lean: the merge is verified by the agent's own
+                        // acceptance check instead of an agent turn.
+                        if st.lean {
+                            let (guard, verdict) = lean_handoff(shared, st, agent, &h);
+                            st = guard;
+                            match verdict {
+                                LeanHandoff::Silent => {
+                                    drop(st);
+                                    continue;
+                                }
+                                LeanHandoff::Turn(extra) => {
+                                    st.log(
+                                        "stop",
+                                        json!({ "agent": agent, "decision": "block", "reason": "region_handoff" }),
+                                    );
+                                    return (
+                                        json!({ "decision": "block", "reason": format!("{text}{extra}") }).to_string(),
+                                        0,
+                                    );
+                                }
+                            }
+                        }
                         if let Some(a) = st.agents.get_mut(agent) {
                             a.check_failures = None;
                         }
