@@ -351,21 +351,14 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     // Order finished peers topologically (producers before consumers) so
     // transitive hand-offs compose cleanly without ordering conflicts.
     let order = crate::run::merge_order(st);
-    // Lean: a peer waiting at its own finish gate has done its work and only
-    // waits to receive others' code, so its regions are released to the
-    // agents waiting on it now (early release, cf. altruistic locking), not
-    // when it finishes. Its later changes reach them through its branch, of
-    // which the released commit is an ancestor.
-    let released =
-        |p: &crate::live::AgentInfo| st.lean && p.status == Status::Running && st.waiting.contains_key(&p.name);
-    let finished: Vec<(String, std::path::PathBuf, String, bool)> = order
+    let finished: Vec<(String, std::path::PathBuf, String)> = order
         .into_iter()
         .filter_map(|name| st.agents.get(&name))
-        .filter(|p| p.name != agent && (p.status.done() || released(p)))
-        .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone(), released(p)))
+        .filter(|p| p.name != agent && p.status.done())
+        .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
         .collect();
     let mut heads = Vec::new();
-    for (peer, p_wt, p_branch, early) in finished {
+    for (peer, p_wt, p_branch) in finished {
         let _ = Repo::commit_if_dirty(&p_wt, &format!("agent {peer}: work committed by concord"));
         let Ok(head) = st.repo.rev_parse(&p_branch) else {
             continue;
@@ -376,9 +369,6 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
                 a.merged_revs.entry(peer).or_insert(head);
             }
             continue;
-        }
-        if early {
-            st.log("region_early_release", json!({ "agent": agent, "owner": peer }));
         }
         let found = conflicts(&st.repo, &me, &head);
         if !found.is_empty() && !can_union_cleanly(&st.repo, &me, &head) {
@@ -402,7 +392,6 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
         .agents
         .values()
         .filter(|p| p.name != agent && p.status == Status::Running && p.rank < my_rank)
-        .filter(|p| !(st.lean && st.waiting.contains_key(&p.name)))
         .filter_map(|p| p.snapshot.clone().map(|s| (p.name.clone(), s)))
         .collect();
     let mut owners = Vec::new();
