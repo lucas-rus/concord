@@ -223,7 +223,7 @@ enum Command {
         /// integration covers what is left. Saves turns and tokens.
         #[arg(long)]
         lean: bool,
-        /// Trim large outputs of commands, web pages and searches (OpenCode
+        /// Trim large outputs of commands and searches (OpenCode
         /// agents) to keep the agents' context small: the head and tail stay,
         /// the full output is saved to a file the agent can search.
         #[arg(long)]

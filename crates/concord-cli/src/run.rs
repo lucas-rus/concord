@@ -120,8 +120,6 @@ fn effective_max_wait(cfg: &RunConfig) -> Duration {
 
 /// Characters of a command or search output kept in the context when trimming.
 const TRIM_OUTPUT_CHARS: usize = 8000;
-/// Characters of a fetched web page kept in the context when trimming.
-const TRIM_WEB_CHARS: usize = 6000;
 /// Repair rounds after integration, and resumes per ticket across them.
 const POST_MERGE_ROUNDS: u32 = 3;
 const POST_MERGE_ATTEMPTS: u32 = 2;
@@ -404,8 +402,7 @@ fn spawn_opencode(
             "worktree": agent.worktree,
             "trim": cfg.trim_outputs.then(|| json!({
                 "output": TRIM_OUTPUT_CHARS,
-                "web": TRIM_WEB_CHARS,
-                "dir": out_dir.join("trimmed"),
+                "dir": cfg_dir.join("trimmed"),
             })),
         }))?,
     )?;

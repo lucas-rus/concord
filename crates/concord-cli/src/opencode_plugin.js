@@ -63,16 +63,18 @@ function notify(event) {
 // Output trimming (settings.trim): a large tool output stays in the agent's
 // context and is re-read by every later model call. Outputs above the limit
 // keep their head and tail (errors and summaries are usually at the end); the
-// full output is saved to a file the agent can search. Applies to tools whose
-// output is transient (commands, web pages, searches), never to file reads
-// or edits.
-const TRIMMED = new Set(["bash", "shell", "execute", "webfetch", "websearch", "grep", "glob", "list"]);
+// full output is saved to a file the agent can search. Applies only to
+// transient output: commands and searches. Never to file reads or edits, and
+// not to fetched web pages: those are reference material the agent works
+// from (in a pilot, every trimmed page was re-read about 3 times, while
+// trimmed command output was almost never re-read).
+const TRIMMED = new Set(["bash", "shell", "execute", "grep", "glob", "list"]);
 let spilled = 0;
 
 function trimText(tool, text) {
-  const limit = settings.trim?.[tool === "webfetch" || tool === "websearch" ? "web" : "output"] ?? 8000;
+  const limit = settings.trim?.output ?? 8000;
   if (typeof text !== "string" || text.length <= limit) return text;
-  const head = tool === "webfetch" || tool === "websearch" ? Math.floor(limit * 0.9) : Math.floor(limit * 0.3);
+  const head = Math.floor(limit * 0.3);
   const tail = limit - head;
   let where = "";
   try {
