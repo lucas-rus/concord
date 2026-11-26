@@ -81,13 +81,35 @@ fn first_line(s: &str, max: usize) -> String {
     }
 }
 
-/// A path relative to the agent's worktree when it lies inside it.
+/// A path relative to the agent's worktree when it lies inside it; another
+/// long absolute path keeps only its last two parts (`…/opencode/x.py`).
 fn short_path(p: &str, agent: &str) -> String {
     let marker = format!("/wt/{agent}/");
     match p.find(&marker) {
         Some(i) => p[i + marker.len()..].to_owned(),
-        None => p.to_owned(),
+        None => compact(p),
     }
+}
+
+/// `/a/b/c/d/e.py` as `…/d/e.py`; short or relative paths unchanged.
+fn compact(word: &str) -> String {
+    let Some(i) = word.find('/') else {
+        return word.to_owned();
+    };
+    let (lead, path) = word.split_at(i);
+    // Only a path that starts the word (after a quote, `=`, `<` or `>`).
+    if !lead
+        .chars()
+        .all(|c| matches!(c, '"' | '\'' | '=' | '<' | '>' | '(' | '@'))
+        && !lead.contains('=')
+    {
+        return word.to_owned();
+    }
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() <= 3 {
+        return word.to_owned();
+    }
+    format!("{lead}…/{}", parts[parts.len() - 2..].join("/"))
 }
 
 /// A shell command with the agent's worktree path written as `.`, and a
@@ -127,7 +149,7 @@ fn short_command(cmd: &str, agent: &str) -> String {
         }
         break;
     }
-    out
+    out.split(' ').map(compact).collect::<Vec<_>>().join(" ")
 }
 
 /// One line describing a tool call, for any agent's tool names.
@@ -401,6 +423,14 @@ mod tests {
             "python3 src/a.py"
         );
         assert_eq!(short_command("git status", "links"), "git status");
+        assert_eq!(
+            short_command("python3 /private/var/folders/n1/T/opencode/simulate.py", "links"),
+            "python3 …/opencode/simulate.py"
+        );
+        assert_eq!(
+            short_path("/private/var/folders/n1/T/opencode/x.py", "links"),
+            "…/opencode/x.py"
+        );
         assert_eq!(
             short_command("PYTHONPATH=src /opt/venv/bin/python -m pytest -q", "links"),
             "PYTHONPATH=src python -m pytest -q"

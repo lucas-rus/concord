@@ -22,6 +22,8 @@
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
 header { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
 header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+header h1::before { content: "✻ "; color: #b46bd6; }
+header .stat { color: var(--dim); }
 header .run { font-family: var(--mono); font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
 header .stat { font-family: var(--mono); font-size: 13px; }
 .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid currentColor; }
@@ -63,8 +65,8 @@ section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; 
 <body>
 <header>
   <h1>concord</h1>
-  <span class="stat" id="clock">--:--</span>
   <span class="pill" id="status">connecting</span>
+  <span class="stat" id="times"></span>
   <span class="stat" id="fin"></span>
   <span class="run" id="run"></span>
 </header>
@@ -175,7 +177,15 @@ function feed(s) {
 let last = null;
 function render(s) {
   last = s;
-  document.getElementById("clock").textContent = mmss(s.clock);
+  const tm = ms => new Date(ms).toLocaleTimeString([], { hour12: false });
+  const dur = t => { t = Math.max(0, Math.floor(t)); return t < 60 ? `${t}s` : t < 3600 ? `${Math.floor(t / 60)}m ${String(t % 60).padStart(2, "0")}s` : `${Math.floor(t / 3600)}h ${String(Math.floor(t / 60) % 60).padStart(2, "0")}m`; };
+  const live = s.status === "running";
+  const parts = [];
+  if (s.start_ms) parts.push(`started ${tm(s.start_ms)}`);
+  if (s.start_ms && !live) parts.push(`ended ${tm(s.start_ms + s.clock * 1000)}`);
+  parts.push(`now ${tm(s.now_ms)}`);
+  parts.push(`elapsed ${dur(live && s.start_ms ? (s.now_ms - s.start_ms) / 1000 : s.clock)}`);
+  document.getElementById("times").textContent = parts.join(" · ");
   const st = document.getElementById("status");
   st.textContent = s.status;
   st.style.color = css(s.done ? "done" : s.status === "running" ? "work" : "held");

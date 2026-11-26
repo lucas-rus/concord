@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Write as _;
 use std::io::{Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -372,54 +371,234 @@ pub fn doing(st: &WatchState, name: &str) -> Option<(String, String)> {
     ))
 }
 
-/// Render the dashboard. `color` adds ANSI colours.
+/// How to draw one frame of the dashboard.
+#[derive(Clone, Debug)]
+pub struct View {
+    /// Terminal columns and rows (0 rows: no height limit).
+    pub width: usize,
+    pub height: usize,
+    /// ANSI colours and the animated spinner.
+    pub color: bool,
+    /// Wall clock now, ms since the epoch.
+    pub now_ms: i64,
+    /// Local time zone offset, seconds east of UTC.
+    pub tz_offset_s: i64,
+    /// Frame counter, for the spinner.
+    pub tick: usize,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View {
+            width: 100,
+            height: 0,
+            color: false,
+            now_ms: now_ms(),
+            tz_offset_s: 0,
+            tick: 0,
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The local time zone offset in seconds (from `date +%z`; 0 if unknown).
+pub fn local_offset() -> i64 {
+    std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+            let sign = if s.starts_with('-') { -1 } else { 1 };
+            let digits = s.trim_start_matches(['+', '-']);
+            let h: i64 = digits.get(0..2)?.parse().ok()?;
+            let m: i64 = digits.get(2..4)?.parse().ok()?;
+            Some(sign * (h * 3600 + m * 60))
+        })
+        .unwrap_or(0)
+}
+
+/// Terminal rows and columns, if stdout's terminal can tell.
+pub fn term_size() -> Option<(usize, usize)> {
+    let tty = std::fs::File::open("/dev/tty").ok()?;
+    let out = std::process::Command::new("stty")
+        .arg("size")
+        .stdin(tty)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut it = s.split_whitespace().map(|x| x.parse::<usize>().ok());
+    Some((it.next()??, it.next()??))
+}
+
+/// `HH:MM:SS` local time of a wall-clock instant.
+fn hms(ms: i64, tz: i64) -> String {
+    let s = (ms / 1000 + tz).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// A duration as `45s`, `25m 33s` or `1h 02m`.
+fn dur(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+/// Cut `s` to `w` characters, ending in `…` when cut.
+fn fit(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        s.to_owned()
+    } else if w == 0 {
+        String::new()
+    } else {
+        s.chars().take(w - 1).collect::<String>() + "…"
+    }
+}
+
+/// Cut `s` to `w` characters from the left (`…tail`), for paths.
+fn fit_left(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w || w == 0 {
+        s.to_owned()
+    } else {
+        "…".to_owned() + &s.chars().skip(n - w + 1).collect::<String>()
+    }
+}
+
+const SPINNER: [&str; 6] = ["✻", "✳", "✢", "·", "✢", "✳"];
+
+/// Render the dashboard at a default size. `color` adds ANSI colours.
 pub fn render(st: &WatchState, title: &str, color: bool) -> String {
+    render_view(
+        st,
+        title,
+        &View {
+            color,
+            ..View::default()
+        },
+    )
+}
+
+/// Render the dashboard to fit `view`.
+pub fn render_view(st: &WatchState, title: &str, view: &View) -> String {
+    let color = view.color;
     let paint = |code: &str, text: &str| {
-        if color {
+        if color && !code.is_empty() {
             format!("\x1b[{code}m{text}\x1b[0m")
         } else {
             text.to_owned()
         }
     };
+    let width = view.width.max(40);
     let finished = st.agents.values().filter(|a| a.state == AgentState::Finished).count();
-    let status = match (st.done, st.heartbeat, st.idle) {
-        (true, _, _) => "complete".to_owned(),
+    let dead = st.heartbeat.is_some_and(|hb| hb > HEARTBEAT_STALE);
+    let (status, status_code) = match (st.done, st.heartbeat, st.idle) {
+        (true, _, _) => ("complete".to_owned(), "32"),
         // Concord writes a heartbeat every few seconds while it runs.
         (false, Some(hb), _) if hb > HEARTBEAT_STALE => {
-            format!("Concord is not running (no heartbeat for {hb} s)")
+            (format!("Concord is not running (no heartbeat for {hb} s)"), "31;1")
         }
-        (false, Some(_), _) => "running".to_owned(),
+        (false, Some(_), _) => ("running".to_owned(), "36"),
         // Older runs without a heartbeat: fall back to the event log.
-        (false, None, Some(idle)) if idle > STALE_SECS => format!("no events for {} min: stopped?", idle / 60),
-        _ => "running".to_owned(),
+        (false, None, Some(idle)) if idle > STALE_SECS => (format!("no events for {} min: stopped?", idle / 60), "33"),
+        _ => ("running".to_owned(), "36"),
     };
     // The run's clock now, to tell how long each agent has been quiet. It
     // keeps ticking between events (and before the first one) while the run
     // is alive.
     let now = st.elapsed + st.idle.unwrap_or(0) as f64;
-    let clock = if st.done || st.heartbeat.is_some_and(|hb| hb > HEARTBEAT_STALE) {
-        st.elapsed
-    } else {
-        now
+    let clock = if st.done || dead { st.elapsed } else { now };
+
+    // Header box.
+    let inner = width - 4;
+    let mut head: Vec<(String, String)> = Vec::new(); // (plain, painted)
+    let name = fit_left(title, inner.saturating_sub(10));
+    head.push((
+        format!("✻ concord  {name}"),
+        format!("{}  {}", paint("1;35", "✻ concord"), paint("1", &name)),
+    ));
+    let mut times = vec![status.clone()];
+    if let Some(start) = st.start_ms {
+        times.push(format!("started {}", hms(start, view.tz_offset_s)));
+        if st.done || dead {
+            times.push(format!(
+                "ended {}",
+                hms(start + (clock * 1000.0) as i64, view.tz_offset_s)
+            ));
+        }
+    }
+    times.push(format!("now {}", hms(view.now_ms, view.tz_offset_s)));
+    // While the run lives, elapsed is wall time since it started.
+    let elapsed = match st.start_ms {
+        Some(start) if !(st.done || dead) => (view.now_ms - start) as f64 / 1000.0,
+        _ => clock,
     };
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{}  {}  {}/{} finished  {}",
-        paint("1", "concord"),
-        title,
-        finished,
-        st.agents.len(),
-        paint("2", &format!("{} · {status}", mmss(clock)))
-    );
-    let width = st.agents.keys().map(String::len).max().unwrap_or(5).max(5);
+    times.push(format!("elapsed {}", dur(elapsed)));
+    // Wrap the parts onto as many lines as the box needs.
+    let mut lines: Vec<Vec<String>> = vec![Vec::new()];
+    for part in times {
+        let cur = lines.last_mut().expect("line");
+        let len: usize = cur.iter().map(|p| p.chars().count() + 3).sum::<usize>() + part.chars().count();
+        if !cur.is_empty() && len > inner {
+            lines.push(vec![part]);
+        } else {
+            cur.push(part);
+        }
+    }
+    for (i, parts) in lines.iter().enumerate() {
+        let plain = fit(&parts.join(" · "), inner);
+        let painted = if i == 0 && plain.starts_with(&status) {
+            format!("{}{}", paint(status_code, &status), paint("2", &plain[status.len()..]))
+        } else {
+            paint("2", &plain)
+        };
+        head.push((plain, painted));
+    }
+    let count = |f: &dyn Fn(&AgentState) -> bool| st.agents.values().filter(|a| f(&a.state)).count();
+    let mut tally = vec![format!("{finished}/{} finished", st.agents.len())];
+    for (n, label) in [
+        (count(&|s| *s == AgentState::Working), "working"),
+        (count(&|s| matches!(s, AgentState::Waiting { .. })), "waiting"),
+        (count(&|s| matches!(s, AgentState::Blocked(_))), "held"),
+        (
+            count(&|s| matches!(s, AgentState::Failed(_) | AgentState::Exited)),
+            "failed",
+        ),
+    ] {
+        if n > 0 {
+            tally.push(format!("{n} {label}"));
+        }
+    }
+    let tally = fit(&tally.join(" · "), inner);
+    head.push((tally.clone(), tally));
+    let mut out_lines: Vec<String> = Vec::new();
+    let bar = "─".repeat(width - 2);
+    out_lines.push(paint("2", &format!("╭{bar}╮")));
+    for (plain, painted) in &head {
+        let pad = inner.saturating_sub(plain.chars().count());
+        out_lines.push(format!(
+            "{} {painted}{} {}",
+            paint("2", "│"),
+            " ".repeat(pad),
+            paint("2", "│")
+        ));
+    }
+    out_lines.push(paint("2", &format!("╰{bar}╯")));
+
+    // Agents: one row each, and what the agent last did under it.
+    let name_w = st.agents.keys().map(|n| n.chars().count()).max().unwrap_or(5).max(5);
     let mut gone: Vec<String> = Vec::new();
     let mut stalled: Vec<(String, u64)> = Vec::new();
-    let _ = writeln!(
-        out,
-        "\n  {:width$}  {:<34} {:>5} {:>7} {:>6} {:>8} {:>8} {:>6}",
-        "agent", "state", "edits", "notices", "blocks", "hand-off", "combined", "merges"
-    );
+    let mut rows: Vec<(String, Option<String>, bool)> = Vec::new(); // (row, detail, finished)
     for (name, a) in &st.agents {
         let (state, code, alarm) = agent_status(st, name, a, now);
         match alarm {
@@ -427,30 +606,67 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             Some(Alarm::Stalled(secs)) => stalled.push((name.clone(), secs)),
             None => {}
         }
-        let mut state = state;
-        if state.chars().count() > 34 {
-            state = state.chars().take(33).collect::<String>() + "…";
-        }
-        let _ = writeln!(
-            out,
-            "  {:width$}  {} {:>5} {:>7} {:>6} {:>8} {:>8} {:>6}",
-            name,
-            paint(code, &format!("{state:<34}")),
-            a.edits.max(st.activity.get(name).map_or(0, |x| x.edits)),
-            a.notices,
-            a.blocks,
-            a.handoffs,
-            a.combined,
-            a.merges
+        let sym = match &a.state {
+            AgentState::Finished => "✓",
+            AgentState::Waiting { .. } => "◷",
+            AgentState::Blocked(_) => "‖",
+            AgentState::Failed(_) | AgentState::Exited => "✗",
+            AgentState::Working if code == "31;1" => "✗",
+            AgentState::Working if color && !st.done => SPINNER[(view.tick + name.len()) % SPINNER.len()],
+            AgentState::Working => "●",
+        };
+        let edits = a.edits.max(st.activity.get(name).map_or(0, |x| x.edits));
+        let counters: Vec<String> = [
+            (edits, "edits"),
+            (a.notices, "notices"),
+            (a.blocks, "blocks"),
+            (a.handoffs, "hand-offs"),
+            (a.combined, "combined"),
+            (a.merges, "merges"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, l)| {
+            // "1 edit", "2 edits"; "combined" stays as it is.
+            let l = if *n == 1 && l.ends_with('s') {
+                &l[..l.len() - 1]
+            } else {
+                l
+            };
+            format!("{n} {l}")
+        })
+        .collect();
+        let counters = counters.join(" · ");
+        // "  ✻ name  state ...  counters"
+        let fixed = 2 + 2 + name_w + 2;
+        let room = width.saturating_sub(fixed);
+        let (state_w, show_counters) = if counters.is_empty() {
+            (room, false)
+        } else if room >= state.chars().count().min(40) + 2 + counters.chars().count() {
+            (room - 2 - counters.chars().count(), true)
+        } else {
+            (room, false)
+        };
+        let state_s = fit(&state, state_w);
+        let mut row = format!(
+            "  {} {}  {}",
+            paint(code, sym),
+            paint("1", &format!("{name:<name_w$}")),
+            paint(code, &state_s)
         );
-        if let Some((ago, what)) = doing(st, name) {
-            let mut what = what;
-            if what.chars().count() > 90 {
-                what = what.chars().take(89).collect::<String>() + "…";
-            }
-            let _ = writeln!(out, "  {:width$}  {}", "", paint("2", &format!("↳ {ago:>9}  {what}")));
+        if show_counters {
+            let pad = state_w - state_s.chars().count() + 2;
+            row.push_str(&" ".repeat(pad));
+            row.push_str(&paint("2", &counters));
         }
+        let detail = doing(st, name).map(|(ago, what)| {
+            let lead = format!("    ⎿  {ago}  ");
+            let what = fit(&what, width.saturating_sub(lead.chars().count()));
+            format!("    {}  {}  {}", paint("2", "⎿"), paint("2", &ago), what)
+        });
+        rows.push((row, detail, a.state == AgentState::Finished));
     }
+
     let mut warnings: Vec<(f64, String)> = st.warnings.clone();
     for g in &gone {
         warnings.push((now, format!("gone      {g}: its process ended without an exit record")));
@@ -464,18 +680,73 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             ),
         ));
     }
+    let mut warn_lines = Vec::new();
     if !warnings.is_empty() {
-        let _ = writeln!(out, "\n  {}", paint("31;1", &format!("{} warning(s)", warnings.len())));
+        warn_lines.push(String::new());
+        warn_lines.push(format!(
+            "  {}",
+            paint("31;1", &format!("⚠ {} warning(s)", warnings.len()))
+        ));
         for (t, line) in warnings.iter().rev().take(5).rev() {
-            let _ = writeln!(out, "  {}  {}", paint("2", &mmss(*t)), paint("31", line));
+            warn_lines.push(format!(
+                "    {}  {}",
+                paint("2", &mmss(*t)),
+                paint("31", &fit(line, width.saturating_sub(11)))
+            ));
         }
     }
-    if !st.feed.is_empty() {
-        let _ = writeln!(out, "\n  {}", paint("1", "coordination"));
-        for (t, line) in &st.feed {
-            let _ = writeln!(out, "  {}  {line}", paint("2", &mmss(*t)));
+
+    // Fit the height: agent rows and warnings always show; then what each
+    // agent is doing (finished agents' first to go); the feed gets the rest,
+    // newest lines first.
+    let budget = if view.height == 0 {
+        usize::MAX
+    } else {
+        view.height.saturating_sub(1)
+    };
+    let fixed = out_lines.len() + 1 + rows.len() + warn_lines.len();
+    let mut spare = budget.saturating_sub(fixed);
+    let mut show_detail = vec![false; rows.len()];
+    for pass_finished in [false, true] {
+        for (i, (_, d, fin)) in rows.iter().enumerate() {
+            if d.is_some() && *fin == pass_finished && spare > 0 {
+                show_detail[i] = true;
+                spare -= 1;
+            }
         }
     }
+    out_lines.push(String::new());
+    for (i, (row, detail, _)) in rows.into_iter().enumerate() {
+        out_lines.push(row);
+        if show_detail[i]
+            && let Some(d) = detail
+        {
+            out_lines.push(d);
+        }
+    }
+    out_lines.extend(warn_lines);
+    if !st.feed.is_empty() && spare >= 3 {
+        let n = (spare - 2).min(st.feed.len());
+        out_lines.push(String::new());
+        let label = " coordination ";
+        out_lines.push(format!(
+            "  {}{}",
+            paint("1", "──"),
+            paint(
+                "1",
+                &format!("{label}{}", "─".repeat(width.saturating_sub(6 + label.len()).min(60)))
+            )
+        ));
+        for (t, line) in st.feed.iter().skip(st.feed.len() - n) {
+            out_lines.push(format!(
+                "  {}  {}",
+                paint("2", &mmss(*t)),
+                fit(line, width.saturating_sub(9))
+            ));
+        }
+    }
+    let mut out = out_lines.join("\n");
+    out.push('\n');
     out
 }
 
@@ -608,6 +879,8 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
     let follow = !dir.join("events.jsonl").exists();
     let mut f = Follower::new(resolve(dir)?);
     let color = !once && std::env::var_os("NO_COLOR").is_none();
+    let tz_offset_s = local_offset();
+    let mut tick = 0;
     loop {
         if follow
             && let Ok(newest) = resolve(dir)
@@ -621,17 +894,38 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
         } else {
             f.title.clone()
         };
-        let screen = render(&f.st, &title, color);
+        let (height, width) = if once {
+            (0, 100)
+        } else {
+            term_size().unwrap_or((0, 100))
+        };
+        let view = View {
+            width,
+            height,
+            color,
+            now_ms: now_ms(),
+            tz_offset_s,
+            tick,
+        };
+        let screen = render_view(&f.st, &title, &view);
         let mut out = std::io::stdout().lock();
         if once {
             write!(out, "{screen}")?;
             return Ok(());
         }
-        write!(out, "\x1b[H\x1b[2J{screen}")?;
+        // Redraw in place: home, each line cleared to its end, rest cleared.
+        let mut frame = String::from("\x1b[H");
+        for line in screen.lines() {
+            frame.push_str(line);
+            frame.push_str("\x1b[K\n");
+        }
+        frame.push_str("\x1b[J");
+        write!(out, "{frame}")?;
         out.flush()?;
         if f.st.done && !follow {
             return Ok(());
         }
+        tick += 1;
         std::thread::sleep(interval);
     }
 }
@@ -686,10 +980,48 @@ mod tests {
         let mut st = fold(&[r#"{"t":60.0,"event":"footprint","data":{"agent":"a"}}"#]);
         st.heartbeat = Some(2);
         st.idle = Some(200);
-        assert!(render(&st, "run", false).contains("04:20 · running"));
+        let screen = render(&st, "run", false);
+        assert!(
+            screen.contains("running") && screen.contains("elapsed 4m 20s"),
+            "{screen}"
+        );
         // A dead run's clock stops at its last event.
         st.heartbeat = Some(600);
-        assert!(render(&st, "run", false).contains("01:00 · Concord is not running"));
+        let screen = render(&st, "run", false);
+        assert!(
+            screen.contains("Concord is not running") && screen.contains("elapsed 1m 00s"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn header_shows_wall_clock_times_and_fits_the_terminal() {
+        let mut st = fold(&[
+            r#"{"t":90.0,"event":"footprint","data":{"agent":"a-long-agent-name"}}"#,
+            r#"{"t":95.0,"event":"region_union","data":{"yielder":"b","owner":"a-long-agent-name","files":["src/a/very/long/path/to/some/module.py"]}}"#,
+        ]);
+        st.start_ms = Some(1_795_651_200_000); // 2026-11-26 00:00:00 UTC
+        st.heartbeat = Some(1);
+        st.idle = Some(30);
+        let view = View {
+            width: 50,
+            height: 0,
+            now_ms: 1_795_651_200_000 + 120_000,
+            tz_offset_s: 2 * 3600,
+            ..View::default()
+        };
+        let screen = render_view(&st, "run", &view);
+        assert!(screen.contains("started 02:00:00"), "{screen}");
+        assert!(screen.contains("now 02:02:00"), "{screen}");
+        assert!(screen.contains("elapsed 2m 00s"), "{screen}");
+        for line in screen.lines() {
+            assert!(line.chars().count() <= 50, "too wide: {line:?}");
+        }
+        // A short terminal keeps the agent rows and drops the feed.
+        let short = render_view(&st, "run", &View { height: 10, ..view });
+        assert!(short.lines().count() <= 9, "{short}");
+        assert!(short.contains("a-long-agent-name"), "{short}");
+        assert!(!short.contains("coordination"), "{short}");
     }
 
     #[test]

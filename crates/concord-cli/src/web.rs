@@ -97,6 +97,7 @@ pub fn snapshot(st: &WatchState, title: &str, run: &Path) -> Value {
     let finished = st.agents.values().filter(|a| a.state == AgentState::Finished).count();
     json!({
         "title": title,
+        "start_ms": st.start_ms,
         "run": run.display().to_string(),
         "clock": if alive { now } else { st.elapsed },
         "status": status,
