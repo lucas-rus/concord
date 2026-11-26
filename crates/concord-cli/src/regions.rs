@@ -209,10 +209,7 @@ pub fn render(owner: &str, owner_finished: bool, files: &[FileConflict]) -> Stri
 /// Which of two agents owns a contested region: a finished agent over a
 /// running one, otherwise the lower rank.
 fn owner_of<'a>(st: &'a State, a: &'a str, b: &'a str) -> (&'a str, &'a str) {
-    let (fa, fb) = (
-        st.agents[a].status == Status::Finished,
-        st.agents[b].status == Status::Finished,
-    );
+    let (fa, fb) = (st.agents[a].status.done(), st.agents[b].status.done());
     let a_owns = match (fa, fb) {
         (true, false) => true,
         (false, true) => false,
@@ -301,7 +298,7 @@ pub fn after_edit(st: &mut State, agent: &str) {
                 .insert((yielder.clone(), owner.clone(), f.file.clone()));
         }
         st.region_yields.insert((yielder.clone(), owner.clone()));
-        let owner_finished = st.agents[&owner].status == Status::Finished;
+        let owner_finished = st.agents[&owner].status.done();
         let text = render(&owner, owner_finished, &new);
         st.log(
             "region_conflict",
@@ -346,7 +343,7 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let finished: Vec<(String, std::path::PathBuf, String)> = order
         .into_iter()
         .filter_map(|name| st.agents.get(&name))
-        .filter(|p| p.name != agent && p.status == Status::Finished)
+        .filter(|p| p.name != agent && p.status.done())
         .map(|p| (p.name.clone(), p.worktree.clone(), p.branch.clone()))
         .collect();
     let mut heads = Vec::new();
@@ -383,7 +380,7 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let running: Vec<(String, String)> = st
         .agents
         .values()
-        .filter(|p| p.name != agent && p.status != Status::Finished && p.rank < my_rank)
+        .filter(|p| p.name != agent && p.status == Status::Running && p.rank < my_rank)
         .filter_map(|p| p.snapshot.clone().map(|s| (p.name.clone(), s)))
         .collect();
     let mut owners = Vec::new();

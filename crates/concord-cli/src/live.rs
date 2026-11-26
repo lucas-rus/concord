@@ -54,6 +54,17 @@ impl std::str::FromStr for Mode {
 pub enum Status {
     Running,
     Finished,
+    /// The agent's process ended without passing the finish gate (out of
+    /// turns, crashed). Nobody waits for it; its work is handed over like a
+    /// finished agent's.
+    Exited,
+}
+
+impl Status {
+    /// Finished, or ended without finishing: its work will not change.
+    pub fn done(self) -> bool {
+        matches!(self, Status::Finished | Status::Exited)
+    }
 }
 
 /// Upper bound on finish-gate blocks per agent (liveness guarantee).

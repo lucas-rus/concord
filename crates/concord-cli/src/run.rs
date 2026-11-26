@@ -406,6 +406,9 @@ fn spawn_opencode(
         // OpenCode has no hooks: the controller asks the gate after each turn
         // (in off mode it only runs the ticket's acceptance check, if any).
         gate: true,
+        // Enough turns for every block the gate may give before it lets the
+        // agent through: gate blocks, check blocks and one hand-off per peer.
+        max_turns: 1 + live::MAX_GATE_BLOCKS + live::MAX_CHECK_BLOCKS + cfg.tasks.len() as u32,
         cfg_dir,
         worktree: agent.worktree.to_path_buf(),
         shared: agent.shared.clone(),
@@ -427,6 +430,7 @@ struct OpencodeJob {
     exe: String,
     model: String,
     gate: bool,
+    max_turns: u32,
     cfg_dir: PathBuf,
     worktree: PathBuf,
     shared: Shared,
@@ -444,7 +448,7 @@ impl OpencodeJob {
         let mut last_text = String::new();
         let mut error = false;
         let mut transport_retries = 0u32;
-        while turns < OPENCODE_MAX_TURNS + transport_retries {
+        while turns < self.max_turns.max(OPENCODE_MAX_TURNS) + transport_retries {
             turns += 1;
             let (sid, text, c, ok) = self.turn(turns, &message, session.as_deref());
             cost += c;
@@ -640,6 +644,13 @@ fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>, 
                     .take(200)
                     .collect();
                 if let Ok(mut st) = shared.lock() {
+                    // A process that ended without passing the gate will not
+                    // change its work again: nobody should wait for it.
+                    if let Some(a) = st.agents.get_mut(&r.name)
+                        && a.status == Status::Running
+                    {
+                        a.status = Status::Exited;
+                    }
                     st.log(
                         "agent_exit",
                         json!({ "agent": r.name, "error": error, "seconds": secs.round(), "result": result }),

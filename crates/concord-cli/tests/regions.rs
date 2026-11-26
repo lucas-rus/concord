@@ -420,3 +420,46 @@ fn finished_consumers_are_resumed_only_for_real_violations() {
         assert_eq!(resume.is_some(), expect_resume, "call {call}: {resume:?}");
     }
 }
+
+/// An owner whose process ended without passing the gate (out of turns,
+/// crashed) is never waited for: its work is handed over like a finished
+/// owner's (hy4m `parallel-regions` run 13 waited 24 min for such an owner).
+#[test]
+fn an_owner_that_exited_is_handed_over_not_waited_for() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(repo.clone(), base.clone(), Mode::Enforce, None, Duration::from_secs(5)).unwrap();
+    st.regions = true;
+    let mut wts = Vec::new();
+    for name in ["owner", "yielder"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let (owner_wt, yielder_wt) = (&wts[0], &wts[1]);
+    edit(&shared, "owner", owner_wt, &BASE.replace("return 1", "return 10"));
+    let out = edit(&shared, "yielder", yielder_wt, &BASE.replace("return 1", "return 11"));
+    assert!(out.contains("region conflict"), "{out}");
+    edit(&shared, "yielder", yielder_wt, BASE);
+    // The owner's process ends without finishing (as `concord run` records it).
+    shared.lock().unwrap().agents.get_mut("owner").unwrap().status = live::Status::Exited;
+    let t0 = std::time::Instant::now();
+    let reason = stop(&shared, "yielder").expect("hand-off");
+    assert!(t0.elapsed() < Duration::from_secs(2), "waited {:?}", t0.elapsed());
+    assert!(reason.contains("merged their finished work"), "{reason}");
+    assert!(
+        fs::read_to_string(yielder_wt.join("m.py"))
+            .unwrap()
+            .contains("return 10")
+    );
+    assert_eq!(stop(&shared, "yielder"), None);
+}
