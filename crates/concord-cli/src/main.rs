@@ -242,13 +242,23 @@ enum Command {
         #[arg(long, default_value = "opencode/qwen4-max-free")]
         model: String,
     },
-    /// Live view of a coordinated run.
+    /// Live view of a coordinated run: each agent's state and latest action,
+    /// and the coordination between agents. Given a parent directory, follows
+    /// the newest run below it.
     Watch {
+        /// A run directory, or a parent of runs (e.g. `.concord/runs`).
         dir: PathBuf,
+        /// Print one frame and exit.
         #[arg(long)]
         once: bool,
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
+        /// Serve the live view in a browser (graph, agent cards, feed).
+        #[arg(long)]
+        web: bool,
+        /// Port for `--web` (127.0.0.1 only).
+        #[arg(long, default_value_t = 4747)]
+        port: u16,
     },
     /// Hook entry point (configured by `concord run`).
     Hook {
@@ -585,8 +595,18 @@ fn main() -> Result<()> {
                 println!("{a}");
             }
         }
-        Command::Watch { dir, once, interval_ms } => {
-            concord_cli::watch::watch(&dir, once, Duration::from_millis(interval_ms))?;
+        Command::Watch {
+            dir,
+            once,
+            interval_ms,
+            web,
+            port,
+        } => {
+            if web {
+                concord_cli::web::serve(&dir, port, Duration::from_millis(interval_ms))?;
+            } else {
+                concord_cli::watch::watch(&dir, once, Duration::from_millis(interval_ms))?;
+            }
         }
         Command::Hook { addr, agent, event } => {
             std::process::exit(live::hook_client(&addr, &agent, &event));

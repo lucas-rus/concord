@@ -1,5 +1,6 @@
 //! Library part of the `concord` CLI: branch analysis and protocol simulation.
 
+pub mod activity;
 pub mod live;
 pub mod mcp;
 pub mod mrp;
@@ -12,6 +13,7 @@ pub mod setup;
 pub mod together;
 pub mod typecheck;
 pub mod watch;
+pub mod web;
 
 use anyhow::{Context, Result};
 use concord_core::{

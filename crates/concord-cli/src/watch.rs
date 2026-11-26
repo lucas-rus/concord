@@ -82,6 +82,13 @@ pub struct WatchState {
     pub warnings: Vec<(f64, String)>,
     /// What each agent's process is doing (if `concord run` recorded it).
     pub probes: BTreeMap<String, crate::probe::Probe>,
+    /// What each agent did, from its own output stream.
+    pub activity: BTreeMap<String, crate::activity::AgentActivity>,
+    /// Coordination between two agents, `(from, to, kind)`: how often, and
+    /// when last (run clock).
+    pub edges: BTreeMap<(String, String, String), (u32, f64)>,
+    /// Wall clock of the run's start (ms since the epoch), from its id.
+    pub start_ms: Option<i64>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -105,6 +112,18 @@ impl WatchState {
         let a = self.agents.entry(name.to_owned()).or_default();
         a.last = a.last.max(t);
         a
+    }
+
+    fn link(&mut self, from: &str, to: &str, kind: &str) {
+        if from != to && from != "?" && to != "?" {
+            let t = self.elapsed;
+            let e = self
+                .edges
+                .entry((from.to_owned(), to.to_owned(), kind.to_owned()))
+                .or_default();
+            e.0 += 1;
+            e.1 = e.1.max(t);
+        }
     }
 
     fn warn(&mut self, t: f64, text: String) {
@@ -165,6 +184,11 @@ impl WatchState {
                         a.blocks += 1;
                     }
                     a.state = AgentState::Blocked(reason.clone());
+                    if reason == "fails_together" {
+                        for c in list(&d, "culprits") {
+                            self.link(&c, &who, "fails together");
+                        }
+                    }
                     let detail = match (d.get("owner"), d.get("owners")) {
                         (Some(o), _) => format!(" (owner {})", o.as_str().unwrap_or("?")),
                         (_, Some(_)) => format!(" (owners {})", list(&d, "owners").join(", ")),
@@ -196,6 +220,7 @@ impl WatchState {
             "region_conflict" => {
                 let (y, o) = (s(&d, "yielder"), s(&d, "owner"));
                 self.agent(&y, t);
+                self.link(&y, &o, "yields");
                 self.say(
                     t,
                     format!("region    {y} yields {} to {o}", list(&d, "files").join(", ")),
@@ -204,6 +229,7 @@ impl WatchState {
             "region_union" => {
                 let (y, o) = (s(&d, "yielder"), s(&d, "owner"));
                 self.agent(&y, t).combined += 1;
+                self.link(&y, &o, "combined");
                 self.say(
                     t,
                     format!(
@@ -215,14 +241,27 @@ impl WatchState {
             "region_handoff" => {
                 let (who, o) = (s(&d, "agent"), s(&d, "owner"));
                 self.agent(&who, t).handoffs += 1;
+                self.link(&o, &who, "hand-off");
                 self.say(t, format!("hand-off  {o} → {who}"));
             }
             "merge" => {
                 let (who, p) = (s(&d, "agent"), s(&d, "producer"));
                 self.agent(&who, t).merges += 1;
+                self.link(&p, &who, "merge");
                 let clean = d.get("clean").and_then(Value::as_bool).unwrap_or(false);
                 let how = if clean { "clean" } else { "with conflicts to resolve" };
                 self.say(t, format!("merge     {p} → {who} ({how})"));
+            }
+            "negotiate" => {
+                let (from, to) = (s(&d, "from"), s(&d, "to"));
+                self.link(&from, &to, "negotiate");
+                self.say(t, format!("negotiate {from} → {to}: {}", s(&d, "symbol")));
+            }
+            "post_merge_resume" => {
+                let who = s(&d, "agent");
+                self.agent(&who, t).state = AgentState::Working;
+                let n = d.get("failures").and_then(Value::as_u64).unwrap_or(0);
+                self.say(t, format!("repair    {who}: {n} check failure(s) on the merged code"));
             }
             "error" => {
                 let who = s(&d, "agent");
@@ -260,6 +299,77 @@ impl WatchState {
 fn mmss(t: f64) -> String {
     let t = t.max(0.0) as u64;
     format!("{:02}:{:02}", t / 60, t % 60)
+}
+
+/// Why an agent needs attention.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Alarm {
+    Gone,
+    Stalled(u64),
+}
+
+/// One agent's state line, its ANSI colour, and an alarm. Silent agents are
+/// explained (a command, thinking, waiting for the model) before anything is
+/// called a failure.
+pub fn agent_status(st: &WatchState, name: &str, a: &AgentView, now: f64) -> (String, &'static str, Option<Alarm>) {
+    let (state, code) = match &a.state {
+        AgentState::Working => ("working".to_owned(), "36"),
+        AgentState::Waiting { on, why } => (format!("waiting for {} ({why})", on.join(", ")), "33"),
+        AgentState::Blocked(r) => (format!("held: {}", r.replace('_', " ")), "31"),
+        AgentState::Finished => ("finished".to_owned(), "32"),
+        AgentState::Failed(m) => (format!("FAILED: {m}"), "31;1"),
+        AgentState::Exited => ("exited without finishing".to_owned(), "31"),
+    };
+    let quiet = now - a.last;
+    if !(a.state == AgentState::Working && st.idle.is_some() && !st.done && quiet > QUIET_SECS) {
+        return (state, code, None);
+    }
+    match st.probes.get(name) {
+        None => (format!("working, last action {} ago", mmss(quiet)), "36", None),
+        Some(p) if !p.alive => {
+            if quiet > GONE_SECS {
+                ("process gone: crashed?".to_owned(), "31;1", Some(Alarm::Gone))
+            } else {
+                (state, code, None)
+            }
+        }
+        Some(p) => match &p.running {
+            Some((cmd, age)) => (format!("running {cmd} ({})", mmss(*age as f64)), "36", None),
+            None if p.active_ago <= ACTIVE_SECS => ("thinking".to_owned(), "36", None),
+            None if p.active_ago > STALL_SECS => (
+                format!("stalled {}", mmss(p.active_ago as f64)),
+                "31;1",
+                Some(Alarm::Stalled(p.active_ago)),
+            ),
+            None => (
+                format!("idle {} (waiting for the model?)", mmss(p.active_ago as f64)),
+                "33",
+                None,
+            ),
+        },
+    }
+}
+
+/// When (m:ss ago while the run lives, else the run's clock) and what the
+/// agent last did, from its own stream.
+pub fn doing(st: &WatchState, name: &str) -> Option<(String, String)> {
+    let last = st.activity.get(name)?.last()?;
+    if st.done
+        && let Some(start) = st.start_ms
+    {
+        return Some((
+            format!("at {}", mmss((last.ms - start) as f64 / 1000.0)),
+            last.what.clone(),
+        ));
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some((
+        format!("{} ago", mmss(((now_ms - last.ms).max(0) / 1000) as f64)),
+        last.what.clone(),
+    ))
 }
 
 /// Render the dashboard. `color` adds ANSI colours.
@@ -311,43 +421,12 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
         "agent", "state", "edits", "notices", "blocks", "hand-off", "combined", "merges"
     );
     for (name, a) in &st.agents {
-        let (state, code) = match &a.state {
-            AgentState::Working => ("working".to_owned(), "36"),
-            AgentState::Waiting { on, why } => (format!("waiting for {} ({why})", on.join(", ")), "33"),
-            AgentState::Blocked(r) => (format!("held: {}", r.replace('_', " ")), "31"),
-            AgentState::Finished => ("finished".to_owned(), "32"),
-            AgentState::Failed(m) => (format!("FAILED: {m}"), "31;1"),
-            AgentState::Exited => ("exited without finishing".to_owned(), "31"),
-        };
-        let quiet = now - a.last;
-        let (state, code) = if a.state == AgentState::Working && st.idle.is_some() && !st.done && quiet > QUIET_SECS {
-            // Silent: find out why before calling anything a failure.
-            match st.probes.get(name) {
-                None => (format!("working, last action {} ago", mmss(quiet)), "36"),
-                Some(p) if !p.alive => {
-                    if quiet > GONE_SECS {
-                        gone.push(name.clone());
-                        ("process gone: crashed?".to_owned(), "31;1")
-                    } else {
-                        (state, code)
-                    }
-                }
-                Some(p) => match &p.running {
-                    Some((cmd, age)) => (format!("running {cmd} ({})", mmss(*age as f64)), "36"),
-                    None if p.active_ago <= ACTIVE_SECS => (format!("thinking, last action {} ago", mmss(quiet)), "36"),
-                    None if p.active_ago > STALL_SECS => {
-                        stalled.push((name.clone(), p.active_ago));
-                        (format!("stalled {}", mmss(p.active_ago as f64)), "31;1")
-                    }
-                    None => (
-                        format!("idle {} (waiting for the model?)", mmss(p.active_ago as f64)),
-                        "33",
-                    ),
-                },
-            }
-        } else {
-            (state, code)
-        };
+        let (state, code, alarm) = agent_status(st, name, a, now);
+        match alarm {
+            Some(Alarm::Gone) => gone.push(name.clone()),
+            Some(Alarm::Stalled(secs)) => stalled.push((name.clone(), secs)),
+            None => {}
+        }
         let mut state = state;
         if state.chars().count() > 34 {
             state = state.chars().take(33).collect::<String>() + "…";
@@ -357,13 +436,20 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
             "  {:width$}  {} {:>5} {:>7} {:>6} {:>8} {:>8} {:>6}",
             name,
             paint(code, &format!("{state:<34}")),
-            a.edits,
+            a.edits.max(st.activity.get(name).map_or(0, |x| x.edits)),
             a.notices,
             a.blocks,
             a.handoffs,
             a.combined,
             a.merges
         );
+        if let Some((ago, what)) = doing(st, name) {
+            let mut what = what;
+            if what.chars().count() > 90 {
+                what = what.chars().take(89).collect::<String>() + "…";
+            }
+            let _ = writeln!(out, "  {:width$}  {}", "", paint("2", &format!("↳ {ago:>9}  {what}")));
+        }
     }
     let mut warnings: Vec<(f64, String)> = st.warnings.clone();
     for g in &gone {
@@ -393,22 +479,35 @@ pub fn render(st: &WatchState, title: &str, color: bool) -> String {
     out
 }
 
-/// Resolve a run directory: the directory holding `events.jsonl`, or a parent
-/// of run directories (the most recent one is used).
+/// Resolve a run directory: the directory holding `events.jsonl`, or the most
+/// recently active run anywhere below a parent directory (a few levels deep, so
+/// `.concord/runs` and benchmark trees both work).
 pub fn resolve(dir: &Path) -> Result<PathBuf> {
     if dir.join("events.jsonl").exists() {
         return Ok(dir.to_owned());
     }
-    let mut runs: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.join("events.jsonl").exists())
-        .filter_map(|p| p.metadata().and_then(|m| m.modified()).ok().map(|m| (m, p)))
-        .collect();
-    runs.sort();
-    runs.pop()
-        .map(|(_, p)| p)
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack = vec![(dir.to_owned(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if !p.is_dir() || e.file_name() == "wt" || e.file_name() == "agents" || e.file_name() == ".git" {
+                continue;
+            }
+            let ev = p.join("events.jsonl");
+            if let Ok(m) = ev.metadata().and_then(|m| m.modified()) {
+                if best.as_ref().is_none_or(|(t, _)| m > *t) {
+                    best = Some((m, p));
+                }
+            } else if depth < 5 {
+                stack.push((p, depth + 1));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
         .with_context(|| format!("no run directory (with events.jsonl) in {}", dir.display()))
 }
 
@@ -426,42 +525,103 @@ fn known_agents(run: &Path) -> Vec<String> {
     names
 }
 
-/// Follow a run until it completes (or once, with `once`).
-pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
-    let run = resolve(dir)?;
-    let title = run
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let color = !once && std::env::var_os("NO_COLOR").is_none();
-    let mut st = WatchState::default();
-    let mut file = std::fs::File::open(run.join("events.jsonl"))?;
-    let mut pending = String::new();
-    let mut prober = crate::probe::Prober::default();
-    loop {
+/// Follows one run: its event log, its agents' processes and their streams.
+pub struct Follower {
+    pub run: PathBuf,
+    pub title: String,
+    pub st: WatchState,
+    file: Option<std::fs::File>,
+    pending: String,
+    prober: crate::probe::Prober,
+    reader: crate::activity::ActivityReader,
+}
+
+impl Follower {
+    pub fn new(run: PathBuf) -> Self {
+        let title = run
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let st = WatchState {
+            start_ms: title
+                .split('-')
+                .next()
+                .and_then(|s| s.parse::<i64>().ok())
+                .map(|s| s * 1000),
+            ..Default::default()
+        };
+        Follower {
+            run,
+            title,
+            st,
+            file: None,
+            pending: String::new(),
+            prober: Default::default(),
+            reader: Default::default(),
+        }
+    }
+
+    /// Read everything new.
+    pub fn refresh(&mut self) -> Result<()> {
+        let run = self.run.clone();
         for a in known_agents(&run) {
-            st.add_agent(&a);
+            self.st.add_agent(&a);
         }
-        let mut chunk = String::new();
-        file.read_to_string(&mut chunk)?;
-        pending.push_str(&chunk);
-        while let Some(i) = pending.find('\n') {
-            let line: String = pending.drain(..=i).collect();
-            st.apply(line.trim_end());
+        if self.file.is_none() {
+            self.file = Some(std::fs::File::open(run.join("events.jsonl"))?);
         }
-        st.done = run.join("report.json").exists();
-        st.probes = prober.probe(&run);
-        st.heartbeat = std::fs::metadata(run.join("heartbeat"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| m.elapsed().ok())
-            .map(|d| d.as_secs());
-        st.idle = std::fs::metadata(run.join("events.jsonl"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| m.elapsed().ok())
-            .map(|d| d.as_secs());
-        let screen = render(&st, &title, color);
+        if let Some(f) = self.file.as_mut() {
+            let mut chunk = String::new();
+            f.read_to_string(&mut chunk)?;
+            self.pending.push_str(&chunk);
+            // Keep reading from where we stopped (the log only grows).
+            let pos = f.stream_position()?;
+            f.seek(SeekFrom::Start(pos))?;
+        }
+        while let Some(i) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=i).collect();
+            self.st.apply(line.trim_end());
+        }
+        self.st.done = run.join("report.json").exists();
+        self.st.probes = self.prober.probe(&run);
+        self.reader.refresh(&run);
+        self.st.activity = self.reader.agents.clone();
+        for a in self.reader.agents.keys() {
+            self.st.add_agent(a);
+        }
+        let age = |f: &str| {
+            std::fs::metadata(run.join(f))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|d| d.as_secs())
+        };
+        self.st.heartbeat = age("heartbeat");
+        self.st.idle = age("events.jsonl");
+        Ok(())
+    }
+}
+
+/// Follow a run until it completes (or once, with `once`). Given a parent
+/// directory, keep following the newest run below it.
+pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
+    let follow = !dir.join("events.jsonl").exists();
+    let mut f = Follower::new(resolve(dir)?);
+    let color = !once && std::env::var_os("NO_COLOR").is_none();
+    loop {
+        if follow
+            && let Ok(newest) = resolve(dir)
+            && newest != f.run
+        {
+            f = Follower::new(newest);
+        }
+        f.refresh()?;
+        let title = if follow {
+            f.run.strip_prefix(dir).unwrap_or(&f.run).display().to_string()
+        } else {
+            f.title.clone()
+        };
+        let screen = render(&f.st, &title, color);
         let mut out = std::io::stdout().lock();
         if once {
             write!(out, "{screen}")?;
@@ -469,13 +629,10 @@ pub fn watch(dir: &Path, once: bool, interval: Duration) -> Result<()> {
         }
         write!(out, "\x1b[H\x1b[2J{screen}")?;
         out.flush()?;
-        if st.done {
+        if f.st.done && !follow {
             return Ok(());
         }
         std::thread::sleep(interval);
-        // Keep reading from where we stopped (the log only grows).
-        let pos = file.stream_position()?;
-        file.seek(SeekFrom::Start(pos))?;
     }
 }
 
@@ -595,7 +752,7 @@ mod tests {
         assert!(!s1.contains("warning"), "{s1}");
         // Thinking (CPU or output just now): fine.
         let s2 = screen_with(&mut st, probe(true, None, 5));
-        assert!(s2.contains("thinking, last action 06:35 ago"), "{s2}");
+        assert!(s2.contains("thinking"), "{s2}");
         assert!(!s2.contains("warning"), "{s2}");
         // Alive and idle for a while (model API?): a hint, not a warning.
         let s3 = screen_with(&mut st, probe(true, None, 200));

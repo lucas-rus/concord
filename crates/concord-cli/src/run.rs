@@ -476,9 +476,9 @@ impl OpencodeJob {
                 message = TRANSPORT_CONTINUE.to_owned();
                 continue;
             }
-            if !ok {
-                error = true;
-            }
+            // The last turn decides: an agent that recovered from a failed
+            // turn (and went on to finish) did not fail.
+            error = !ok;
             if !self.gate {
                 break;
             }
