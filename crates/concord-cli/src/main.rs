@@ -223,6 +223,11 @@ enum Command {
         /// integration covers what is left. Saves turns and tokens.
         #[arg(long)]
         lean: bool,
+        /// Trim large outputs of commands, web pages and searches (OpenCode
+        /// agents) to keep the agents' context small: the head and tail stay,
+        /// the full output is saved to a file the agent can search.
+        #[arg(long)]
+        trim_outputs: bool,
         /// Structured merge driver for merges and conflict checks, e.g. `mergiraf`.
         #[arg(long)]
         merge_driver: Option<String>,
@@ -464,6 +469,7 @@ fn main() -> Result<()> {
             speculative_secs,
             fails_together,
             lean,
+            trim_outputs,
             merge_driver,
             resume_rounds,
             claude,
@@ -524,6 +530,7 @@ fn main() -> Result<()> {
                     speculative_secs,
                     fails_together,
                     lean,
+                    trim_outputs,
                     merge_driver: merge_driver.clone(),
                     resume_rounds,
                     claude: claude.clone(),

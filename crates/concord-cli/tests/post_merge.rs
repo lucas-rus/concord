@@ -87,6 +87,7 @@ fn every_ticket_failing_after_integration_is_repaired() {
         speculative_secs: None,
         fails_together: false,
         lean: false,
+        trim_outputs: false,
         merge_driver: None,
         resume_rounds: 1,
         claude: agent.to_string_lossy().into_owned(),

@@ -298,6 +298,13 @@ pub fn after_edit(st: &mut State, agent: &str) {
                 .insert((yielder.clone(), owner.clone(), f.file.clone()));
         }
         st.region_yields.insert((yielder.clone(), owner.clone()));
+        let ysnap = if yielder == agent { me.clone() } else { snap.clone() };
+        let ybase = st.agents.get(&yielder).map(|a| a.base.clone()).unwrap_or_default();
+        st.yield_snaps.entry((yielder.clone(), owner.clone())).or_insert((
+            ybase,
+            ysnap,
+            new.iter().map(|f| f.file.clone()).collect(),
+        ));
         let owner_finished = st.agents[&owner].status.done();
         let text = render(&owner, owner_finished, &new);
         st.log(
@@ -310,6 +317,9 @@ pub fn after_edit(st: &mut State, agent: &str) {
         }
     }
 }
+
+/// Lines of the yielder's own earlier diff shown in a hand-off.
+const YIELD_DIFF_LINES: usize = 60;
 
 /// A hand-off just merged into an agent's worktree.
 pub struct Handoff {
@@ -439,6 +449,7 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
     let mut combined = false;
     let mut before: Option<String> = None;
     let mut yielded_any = false;
+    let mut yield_notes = String::new();
     for (peer, head, initial_union) in heads {
         let yielded = st.region_yields.contains(&(agent.to_owned(), peer.clone()));
         if (!yielded && initial_union.is_empty()) || st.agents[agent].merged_producers.contains(&peer) {
@@ -486,6 +497,26 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
                 );
                 combined |= used_union;
                 yielded_any |= yielded;
+                if yielded && let Some((b, s, files)) = st.yield_snaps.get(&(agent.to_owned(), peer.clone())) {
+                    let mut args = vec!["diff", "--unified=1", b.as_str(), s.as_str(), "--"];
+                    args.extend(files.iter().map(String::as_str));
+                    if let Ok(d) = st.repo.git(&args)
+                        && !d.trim().is_empty()
+                    {
+                        let lines: Vec<&str> = d.lines().collect();
+                        let shown = lines
+                            .iter()
+                            .take(YIELD_DIFF_LINES)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let more = lines.len().saturating_sub(YIELD_DIFF_LINES);
+                        yield_notes.push_str(&format!(
+                            "\nBefore you yielded to `{peer}`, your change to those lines was:\n```diff\n{shown}\n```\n{}",
+                            if more > 0 { format!("({more} more lines not shown.)\n") } else { String::new() }
+                        ));
+                    }
+                }
                 handed.push(format!("`{peer}`"));
             }
             Ok(m) => {
@@ -527,8 +558,13 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
             text: format!(
                 "[concord] {} finished, and Concord merged their finished work into your worktree. {how} If your \
                  feature needs to change the lines they own, do it now, on top of their version. Run the tests and \
-                 finish.",
-                handed.join(", ")
+                 finish.{}",
+                handed.join(", "),
+                if yield_notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("{yield_notes}Re-apply only what your feature still needs, on top of their version.")
+                }
             ),
             before,
             yielded: yielded_any,

@@ -66,6 +66,8 @@ pub struct RunConfig {
     pub fails_together: bool,
     /// Lean gate (see `live::State::lean`).
     pub lean: bool,
+    /// Trim large transient tool outputs (OpenCode plugin, `opencode_plugin.js`).
+    pub trim_outputs: bool,
     /// Structured merge driver executable (Mergiraf-compatible CLI).
     pub merge_driver: Option<String>,
     pub resume_rounds: u32,
@@ -105,6 +107,21 @@ const OPENCODE_MAX_TURNS: u32 = 10;
 
 /// Resumes of a session after its turn ended on a network error.
 const OPENCODE_TRANSPORT_RETRIES: u32 = 5;
+/// Longest wait at the finish gate with `--lean` before the agent gets a turn.
+const LEAN_MAX_WAIT: Duration = Duration::from_secs(1800);
+/// How long the finish gate may hold a waiting agent before giving it a turn.
+fn effective_max_wait(cfg: &RunConfig) -> Duration {
+    if cfg.lean {
+        cfg.max_wait.max(LEAN_MAX_WAIT)
+    } else {
+        cfg.max_wait
+    }
+}
+
+/// Characters of a command or search output kept in the context when trimming.
+const TRIM_OUTPUT_CHARS: usize = 8000;
+/// Characters of a fetched web page kept in the context when trimming.
+const TRIM_WEB_CHARS: usize = 6000;
 /// Repair rounds after integration, and resumes per ticket across them.
 const POST_MERGE_ROUNDS: u32 = 3;
 const POST_MERGE_ATTEMPTS: u32 = 2;
@@ -244,7 +261,7 @@ fn settings_json(cfg: &RunConfig, addr: &str, agent: &str, check: bool) -> Value
     } else {
         json!({
             "PostToolUse": [{ "matcher": "*", "hooks": [hook("PostToolUse", 120)] }],
-            "Stop": [{ "hooks": [hook("Stop", cfg.max_wait.as_secs() + CHECK_TIMEOUT_SECS)] }]
+            "Stop": [{ "hooks": [hook("Stop", effective_max_wait(cfg).as_secs() + CHECK_TIMEOUT_SECS)] }]
         })
     };
     settings
@@ -385,6 +402,11 @@ fn spawn_opencode(
             "addr": agent.addr,
             "agent": name,
             "worktree": agent.worktree,
+            "trim": cfg.trim_outputs.then(|| json!({
+                "output": TRIM_OUTPUT_CHARS,
+                "web": TRIM_WEB_CHARS,
+                "dir": out_dir.join("trimmed"),
+            })),
         }))?,
     )?;
     let first = match session {
@@ -792,7 +814,10 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
         base.clone(),
         cfg.mode,
         Some(&run_dir.join("events.jsonl")),
-        cfg.max_wait,
+        // Lean: an agent at the finish gate has nothing left to do but wait,
+        // so it waits for a live owner instead of taking a turn every
+        // `max_wait`; owners that exit are never waited for.
+        effective_max_wait(cfg),
     )?;
     let has_real_test_cmd = !cfg.test_cmd.trim().is_empty() && cfg.test_cmd.trim() != "true";
     let fallback_check =

@@ -165,6 +165,10 @@ pub struct State {
     /// Pairs (yielder, owner) with a region yielded at some point: the owner's
     /// finished work is handed over to the yielder.
     pub(crate) region_yields: BTreeSet<(String, String)>,
+    /// The yielder's change to an owner's lines when it was asked to yield:
+    /// `(yielder, owner) -> (yielder's base, yielder's snapshot, files)`, so
+    /// the hand-off can show it exactly what it gave up.
+    pub(crate) yield_snaps: BTreeMap<(String, String), (String, String, Vec<String>)>,
     /// Waits-for graph of the finish gate, across the contract and region
     /// layers: agent -> agents it is currently waiting for. A wait that would
     /// close a cycle is never entered (no cross-layer deadlock).
@@ -219,6 +223,7 @@ impl State {
             publish_debounce: Duration::ZERO,
             region_alerted: BTreeSet::new(),
             region_yields: BTreeSet::new(),
+            yield_snaps: BTreeMap::new(),
             waiting: BTreeMap::new(),
             file_owners: BTreeMap::new(),
             overlap_alerted: BTreeSet::new(),

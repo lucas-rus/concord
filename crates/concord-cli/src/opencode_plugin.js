@@ -11,7 +11,7 @@
 // asks the gate whenever the agent stops.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 let settings = null;
@@ -60,11 +60,58 @@ function notify(event) {
   }
 }
 
+// Output trimming (settings.trim): a large tool output stays in the agent's
+// context and is re-read by every later model call. Outputs above the limit
+// keep their head and tail (errors and summaries are usually at the end); the
+// full output is saved to a file the agent can search. Applies to tools whose
+// output is transient (commands, web pages, searches), never to file reads
+// or edits.
+const TRIMMED = new Set(["bash", "shell", "execute", "webfetch", "websearch", "grep", "glob", "list"]);
+let spilled = 0;
+
+function trimText(tool, text) {
+  const limit = settings.trim?.[tool === "webfetch" || tool === "websearch" ? "web" : "output"] ?? 8000;
+  if (typeof text !== "string" || text.length <= limit) return text;
+  const head = tool === "webfetch" || tool === "websearch" ? Math.floor(limit * 0.9) : Math.floor(limit * 0.3);
+  const tail = limit - head;
+  let where = "";
+  try {
+    mkdirSync(settings.trim.dir, { recursive: true });
+    const file = join(settings.trim.dir, `${settings.agent}-${tool}-${Date.now()}-${spilled++}.txt`);
+    writeFileSync(file, text);
+    where = ` The full output is in ${file}; search it with grep or read parts with sed if you need more.`;
+  } catch {
+    // Without a file, the trimmed text still says what was left out.
+  }
+  const note = `\n[concord: ${text.length - head - tail} of ${text.length} characters omitted here to keep your context small.${where}]\n`;
+  return text.slice(0, head) + note + (tail > 0 ? text.slice(text.length - tail) : "");
+}
+
+function trimResult(event) {
+  if (!settings?.trim || !TRIMMED.has(event.tool) || event.status !== "completed") return;
+  const r = event.result;
+  if (!r) return;
+  if (typeof r.content === "string") {
+    event.result = { ...r, content: trimText(event.tool, r.content) };
+  } else if (Array.isArray(r.content)) {
+    event.result = {
+      ...r,
+      content: r.content.map((c) => (c?.type === "text" ? { ...c, text: trimText(event.tool, c.text) } : c)),
+    };
+  }
+}
+
 export default {
   id: "concord",
   setup(ctx) {
-    if (!settings?.enabled) return;
+    if (!settings?.enabled && !settings?.trim) return;
     ctx.tool.hook("execute.after", async (event) => {
+      try {
+        trimResult(event);
+      } catch {
+        // Never break the agent's tool call because of Concord.
+      }
+      if (!settings?.enabled) return;
       try {
         const notice = notify(event);
         if (notice && event.status === "completed" && Array.isArray(event.result?.content)) {
