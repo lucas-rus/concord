@@ -107,15 +107,11 @@ const OPENCODE_MAX_TURNS: u32 = 10;
 
 /// Resumes of a session after its turn ended on a network error.
 const OPENCODE_TRANSPORT_RETRIES: u32 = 5;
-/// Longest wait at the finish gate with `--lean` before the agent gets a turn.
-const LEAN_MAX_WAIT: Duration = Duration::from_secs(1800);
 /// How long the finish gate may hold a waiting agent before giving it a turn.
+/// (Longer lean waits, 30 min, raised hand-off conflicts in a pilot and were
+/// reverted: a waiting agent gets a turn every `max_wait` as before.)
 fn effective_max_wait(cfg: &RunConfig) -> Duration {
-    if cfg.lean {
-        cfg.max_wait.max(LEAN_MAX_WAIT)
-    } else {
-        cfg.max_wait
-    }
+    cfg.max_wait
 }
 
 /// Characters of a command or search output kept in the context when trimming.
