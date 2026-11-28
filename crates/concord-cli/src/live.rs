@@ -1561,9 +1561,9 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
         }
 
         // A merge with conflict markers is in progress: finish it first.
-        if st.peer_merge
+        if (st.peer_merge || st.regions)
             && st.agents.get(agent).is_some_and(|a| a.pending_peer.is_some())
-            && let Some(reason) = integrate_peers(&mut st, agent)
+            && let Some(reason) = finish_pending_merge(&mut st, agent)
         {
             if let Some(a) = st.agents.get_mut(agent) {
                 a.stats.gate_blocks += 1;
@@ -2051,10 +2051,10 @@ fn has_markers(path: &Path) -> bool {
 
 /// Peer integration step of the finish gate. Returns a block reason, or None
 /// if the agent may finish.
-fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
+/// A merge left with conflict markers in `agent`'s worktree (peer merge or a
+/// region hand-off): hold the agent until no markers remain, then commit it.
+fn finish_pending_merge(st: &mut State, agent: &str) -> Option<String> {
     let wt = st.agents[agent].worktree.clone();
-
-    // 1. A peer merge is in progress: wait until all markers are gone, then commit it.
     if let Some((peer, head)) = st.agents[agent].pending_peer.clone() {
         let unresolved: Vec<String> = st.agents[agent]
             .pending_conflicts
@@ -2087,6 +2087,17 @@ fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
         }
         st.log("peer_merge_resolved", json!({ "agent": agent, "peer": peer }));
         let _ = st.refresh_inner(agent, true);
+    }
+
+    None
+}
+
+fn integrate_peers(st: &mut State, agent: &str) -> Option<String> {
+    let wt = st.agents[agent].worktree.clone();
+
+    // 1. A merge is in progress: wait until all markers are gone, then commit it.
+    if let Some(reason) = finish_pending_merge(st, agent) {
+        return Some(reason);
     }
 
     // 2. Find a finished peer whose work conflicts textually with ours.

@@ -499,10 +499,50 @@ pub fn gate(st: &mut State, agent: &str, may_wait: bool) -> Gate {
                 if !handed.is_empty() {
                     break;
                 }
-                let latest = Repo::snapshot_worktree(&wt).unwrap_or(me);
-                let found = conflicts(&st.repo, &latest, &head);
+                // Put the conflict in front of the agent: merge again, this
+                // time leaving git's conflict markers in its worktree, and
+                // hold it until they are resolved (as peer merge does). Asked
+                // only to "resolve against the finished version", agents
+                // could not see what to reconcile and ran out of attempts.
                 st.region_yields.insert((agent.to_owned(), peer.clone()));
-                return Gate::Block(render(&peer, true, &found));
+                match Repo::merge_keep_conflicts(&wt, &head, &msg) {
+                    Ok(out) if !out.clean => {
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.pending_conflicts = out.conflicted_files.clone();
+                            a.pending_peer = Some((peer.clone(), head.clone()));
+                            a.merged_producers.insert(peer.clone());
+                            a.stats.merges.push(peer.clone());
+                        }
+                        st.log(
+                            "region_handoff_markers",
+                            json!({ "agent": agent, "owner": peer, "files": out.conflicted_files }),
+                        );
+                        return Gate::Block(format!(
+                            "[concord] `{peer}` finished, and its work overlaps yours. Concord merged it into your \
+                             worktree and left git's conflict markers in: {}. Resolve each conflict so that both your \
+                             feature and theirs work (keep their version of the lines they own, and add your change \
+                             on top), remove all markers, run the tests, then finish.",
+                            out.conflicted_files.join(", ")
+                        ));
+                    }
+                    Ok(_) => {
+                        // Merged cleanly after all (the worktree changed since).
+                        let new_base = st.advance_base(&st.agents[agent].base.clone(), &head);
+                        if let Some(a) = st.agents.get_mut(agent) {
+                            a.base = new_base;
+                            a.merged_producers.insert(peer.clone());
+                            a.merged_revs.insert(peer.clone(), head.clone());
+                        }
+                        handed.push(format!("`{peer}`"));
+                        continue;
+                    }
+                    Err(e) => {
+                        st.log("error", json!({ "agent": agent, "error": e.to_string() }));
+                        let latest = Repo::snapshot_worktree(&wt).unwrap_or(me);
+                        let found = conflicts(&st.repo, &latest, &head);
+                        return Gate::Block(render(&peer, true, &found));
+                    }
+                }
             }
             Err(e) => {
                 st.log("error", json!({ "agent": agent, "error": e.to_string() }));

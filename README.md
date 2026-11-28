@@ -251,6 +251,9 @@ concord run --tasks tasks.json --mode enforce --regions --test-cmd "npm test"
 concord run --milestones waves.json --mode enforce --regions --test-cmd "npm test"
 ```
 
+> [!TIP]
+> **Lean by default (0.2.0).** In enforce mode the finish gate verifies each hand-off with the agent's own acceptance check instead of spending an agent turn on it, sends an agent back for a failing check at most once, and lets the repair pass after integration handle the rest. On 12-agent CommonMark this cut tokens by about a quarter at the same 652/652 and zero conflicts. `--no-lean` restores the previous gate. With OpenCode agents, `--trim-outputs` also keeps large command and search outputs out of the agents' context (head and tail stay; the full output is saved to a file the agent can search).
+
 > [!NOTE]
 > **Zero-config acceptance gating:** `tasks.json` only needs `[{"name": "...", "prompt": "..."}]` — when per-ticket `check` commands are omitted, Concord automatically uses `--test-cmd` for finish-gate verification, cross-agent regression gating, and $O(\log k)$ post-merge failure bisection.
 

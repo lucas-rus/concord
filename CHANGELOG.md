@@ -2,6 +2,15 @@
 
 All notable changes to **Concord** are documented in this file.
 
+## [0.2.0] - 2026-11-28
+- **Lean gate is the default** in enforce mode (`--no-lean` turns it off; `--lean` is still accepted). A hand-off whose merge breaks none of the agent's acceptance-check tests (run before and after the merge) needs no agent turn; the check sends an agent back at most once; the repair pass after integration covers the rest.
+- **`--trim-outputs`** (OpenCode agents): command and search outputs above 8,000 characters keep their head and tail in the context; the full output is saved to a file the agent can search. File reads, edits and fetched web pages are never trimmed.
+- **Conflicting region hand-offs leave git's conflict markers** in the agent's worktree and hold it until they are resolved (as peer merge does), instead of asking it to reconcile with a version it cannot see.
+- **Repair pass after integration** re-evaluates every ticket's check each round and resumes every still-failing ticket at once (was: the first four of the initial list).
+- **Agents that exit without finishing are never waited for**; OpenCode agents get enough turns for every block the gate may give.
+- **Bounded checks**: acceptance checks and test commands run with a timeout in their own process group (`CONCORD_CHECK_TIMEOUT_SECS`, default 120 s), so a hanging test cannot stall a run.
+- **`concord watch`**: each agent's latest action from its own stream, a Claude Code–style terminal view sized to the terminal with start, now and elapsed time, `--web` for a browser view with a live coordination graph, and following the newest run under a parent directory.
+
 ## [0.1.7] - 2026-11-25
 - `concord setup --client antigravity` registers the MCP server in Antigravity's global `~/.gemini/config/mcp_config.json`; `auto` detects an Antigravity installation.
 

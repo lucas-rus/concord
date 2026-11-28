@@ -217,11 +217,14 @@ enum Command {
         /// together but pass alone (with O(log k) peer bisection).
         #[arg(long)]
         fails_together: bool,
-        /// Lean gate (enforce mode): hand-offs that break none of the agent's
-        /// acceptance-check tests happen without an agent turn, and the check
-        /// sends an agent back at most once; the repair pass after
-        /// integration covers what is left. Saves turns and tokens.
-        #[arg(long)]
+        /// Turn off the lean gate (on by default in enforce mode). The lean
+        /// gate verifies hand-offs with the agent's acceptance check instead of
+        /// an agent turn, and the check sends an agent back at most once; the
+        /// repair pass after integration covers what is left.
+        #[arg(long, conflicts_with = "lean")]
+        no_lean: bool,
+        /// Lean gate: the default since 0.2.0; kept so older scripts work.
+        #[arg(long, hide = true)]
         lean: bool,
         /// Trim large outputs of commands and searches (OpenCode
         /// agents) to keep the agents' context small: the head and tail stay,
@@ -468,7 +471,8 @@ fn main() -> Result<()> {
             publish_debounce_ms,
             speculative_secs,
             fails_together,
-            lean,
+            no_lean,
+            lean: _,
             trim_outputs,
             merge_driver,
             resume_rounds,
@@ -529,7 +533,7 @@ fn main() -> Result<()> {
                     publish_debounce: Duration::from_millis(publish_debounce_ms),
                     speculative_secs,
                     fails_together,
-                    lean,
+                    lean: !no_lean,
                     trim_outputs,
                     merge_driver: merge_driver.clone(),
                     resume_rounds,

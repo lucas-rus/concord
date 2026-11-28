@@ -534,3 +534,62 @@ fn lean_hand_off_that_breaks_a_test_gets_a_turn() {
     let reason = decision.expect("turn");
     assert!(reason.contains("passed before the merge and fail now"), "{reason}");
 }
+
+/// A region hand-off that left git's conflict markers in an agent's worktree
+/// holds the agent until they are resolved, then the merge is committed and
+/// the agent may finish (shared with peer merge).
+#[test]
+fn hand_off_with_conflict_markers_is_held_until_resolved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        None,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+    st.regions = true;
+    let mut wts = Vec::new();
+    for name in ["owner", "yielder"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let (owner_wt, yielder_wt) = (wts[0].clone(), wts[1].clone());
+    fs::write(owner_wt.join("m.py"), BASE.replace("return 1", "return 10")).unwrap();
+    git(&owner_wt, &["commit", "-qam", "owner"]);
+    fs::write(yielder_wt.join("m.py"), BASE.replace("return 1", "return 11")).unwrap();
+    git(&yielder_wt, &["commit", "-qam", "yielder"]);
+    let head = repo.rev_parse("b/owner").unwrap();
+    // The state a conflicting hand-off leaves behind.
+    let out =
+        Repo::merge_keep_conflicts(&yielder_wt, &head, "concord: hand-off of owner's regions to yielder").unwrap();
+    assert!(!out.clean);
+    {
+        let a = st.agents.get_mut("yielder").unwrap();
+        a.pending_conflicts = out.conflicted_files.clone();
+        a.pending_peer = Some(("owner".into(), head.clone()));
+        a.merged_producers.insert("owner".into());
+    }
+    st.agents.get_mut("owner").unwrap().status = live::Status::Finished;
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let reason = stop(&shared, "yielder").expect("held");
+    assert!(reason.contains("unresolved conflict markers"), "{reason}");
+    fs::write(yielder_wt.join("m.py"), BASE.replace("return 1", "return 10 + 1")).unwrap();
+    assert_eq!(stop(&shared, "yielder"), None);
+    let mine = repo.rev_parse("b/yielder").unwrap();
+    assert!(
+        repo.is_ancestor(&head, &mine),
+        "the owner's work is in the yielder's branch"
+    );
+}
