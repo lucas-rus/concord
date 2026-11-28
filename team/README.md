@@ -14,9 +14,16 @@ Each clash comes with a **verdict**: who adapts, and why. Your AI sees it in its
 ## Install
 
 ```bash
-brew install lucas-rus/tap/concord-team    # installs concord too
-brew install --cask tailscale              # then open Tailscale and log in
+curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/teams/team/install.sh | sh
 ```
+
+or with Homebrew (newer Homebrew asks you to trust a third-party tap once):
+
+```bash
+brew trust lucas-rus/tap && brew install lucas-rus/tap/concord-team
+```
+
+Then install [Tailscale](https://tailscale.com/download) (`brew install --cask tailscale`), open it and log in.
 
 Everyone on the team must be in the same tailnet: invite each other in the Tailscale admin console, or share your machine.
 
