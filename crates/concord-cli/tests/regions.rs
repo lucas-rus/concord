@@ -595,3 +595,58 @@ fn hand_off_with_conflict_markers_is_held_until_resolved() {
         "the owner's work is in the yielder's branch"
     );
 }
+
+/// An agent whose change still overlaps a finished owner's lines gets the
+/// owner's work merged in with conflict markers (not only an instruction to
+/// restore its lines), and may finish once it has resolved them.
+#[test]
+fn overlap_with_a_finished_owner_is_merged_with_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    fs::write(root.join("m.py"), BASE).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let repo = Repo::open(&root).unwrap();
+    let base = repo.rev_parse("HEAD").unwrap();
+    let mut st = State::new(
+        repo.clone(),
+        base.clone(),
+        Mode::Enforce,
+        None,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+    st.regions = true;
+    let mut wts = Vec::new();
+    for name in ["owner", "yielder"] {
+        let wt = tmp.path().join("wt").join(name);
+        repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+        st.add_agent(name, wt.clone(), format!("b/{name}"), "task");
+        wts.push(wt);
+    }
+    let shared: Shared = Arc::new(Mutex::new(st));
+    let (owner_wt, yielder_wt) = (&wts[0], &wts[1]);
+    edit(&shared, "owner", owner_wt, &BASE.replace("return 1", "return 10"));
+    let out = edit(&shared, "yielder", yielder_wt, &BASE.replace("return 1", "return 11"));
+    assert!(out.contains("region conflict"), "{out}");
+    assert_eq!(stop(&shared, "owner"), None);
+    // The yielder keeps its overlapping change and tries to finish.
+    let reason = stop(&shared, "yielder").expect("markers to resolve");
+    assert!(reason.contains("conflict markers"), "{reason}");
+    assert!(fs::read_to_string(yielder_wt.join("m.py")).unwrap().contains("<<<<<<<"));
+    assert!(
+        stop(&shared, "yielder")
+            .expect("held")
+            .contains("unresolved conflict markers")
+    );
+    fs::write(yielder_wt.join("m.py"), BASE.replace("return 1", "return 10 + 1")).unwrap();
+    assert_eq!(stop(&shared, "yielder"), None);
+    let head = repo.rev_parse("b/owner").unwrap();
+    let mine = repo.rev_parse("b/yielder").unwrap();
+    assert!(
+        repo.is_ancestor(&head, &mine),
+        "the owner's work is in the yielder's branch"
+    );
+}
