@@ -2,7 +2,7 @@
 # Install concord-team (and concord, if missing) into ~/.local/bin.
 #   curl -fsSL https://raw.githubusercontent.com/lucas-rus/concord/teams/team/install.sh | sh
 set -eu
-VERSION="0.1.0"
+VERSION="0.2.0"
 BIN="${CONCORD_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN"
 command -v python3 >/dev/null 2>&1 || { echo "concord-team needs python3 (macOS: xcode-select --install)" >&2; exit 1; }

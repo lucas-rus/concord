@@ -3,7 +3,7 @@
 
 Everyone keeps their own AI tool (Claude Code, Cursor, OpenCode, ...) and their
 own clone. concord-team snapshots each person's work in progress, shares it
-with the team directly over Tailscale (and optionally through a mailbox), and
+with the team directly over Tailscale (and through an always-online relay), and
 runs Concord's contract and overlap analysis locally against every teammate's
 work and against main. Clashes come with a verdict: who adapts, and why.
 
@@ -15,6 +15,8 @@ work and against main. Clashes come with a verdict: who adapts, and why.
   concord-team urgent on|off        mark your work urgent (you win clashes)
   concord-team setup claude         notices, team brief and status line in Claude Code
   concord-team doctor               check git, concord, Tailscale, peers
+  concord-team relay <url> <key>    also sync through an always-online relay
+  concord-team serve                run the relay + Discord bot (on a server)
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PORTS = range(7421, 7426)
 SNAP = "refs/concord/snap"
 PEERS = "refs/concord/peers/"
@@ -114,7 +116,10 @@ def has_commit(sha: str | None) -> bool:
 
 
 def find_root(start: str | None = None) -> str:
-    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start or None, capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start or None, capture_output=True, text=True)
+    except OSError:  # no git (e.g. the relay's container) or a missing directory
+        return ""
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
@@ -663,7 +668,7 @@ def findings_against(c: dict, peer: str, ref: str, metas: dict) -> list[dict]:
                        f"once {peer}'s work is in, build on their version." if y == me else
                        f"{peer} is expected to move their change; keep going."),
                 "team": f"✖ {me} and {peer} edited the same lines in {fl} → {y} yields ({why})",
-                "poster": min(me, peer),
+                "poster": min(me, peer), "fixer": y, "parties": [me, peer],
             })
     for f in a.get("findings", []):
         t = f.get("type")
@@ -714,7 +719,7 @@ def findings_against(c: dict, peer: str, ref: str, metas: dict) -> list[dict]:
                         "detail": detail, "verdict": verdict, "ai": ai,
                         "team": f"⚠ {P} changed `{after}` ({why_c}); it breaks {C}'s {site.get('path', '?')}:"
                                 f"{site.get('line', '?')} → {fixer} fixes ({why})",
-                        "poster": C})
+                        "poster": C, "fixer": fixer, "parties": [P, C]})
         elif t == "duplicate_definition":
             sym = f.get("symbol", "?")
             w, why = owner(me, peer, (metas[me].get("symbols") or {}).get(sym),
@@ -726,7 +731,7 @@ def findings_against(c: dict, peer: str, ref: str, metas: dict) -> list[dict]:
                         "verdict": f"→ {'you reuse theirs' if y == me else peer + ' reuses yours'} · {why}",
                         "ai": f"Reuse {peer}'s `{short(sym)}` instead of defining your own." if y == me else "Keep yours.",
                         "team": f"⚠ {me} and {peer} both added `{sym}` → {y} reuses the other's ({why})",
-                        "poster": min(me, peer)})
+                        "poster": min(me, peer), "fixer": y, "parties": [me, peer]})
         elif t == "same_symbol" and not clash_files:
             sym = f.get("symbol", "?")
             out.append({"key": f"same|{min(me, peer)}|{max(me, peer)}|{sym}", "icon": "✎", "you_fix": False,
@@ -754,9 +759,14 @@ class Sync:
         changed = refresh_self(self.c)
         if changed:
             self.peers.poke_all()
-            if self.mailbox and my_bundle():
-                with contextlib.suppress(Exception):
-                    self.mailbox.publish(my_meta(), my_bundle())
+        meta = my_meta()
+        if self.mailbox and my_bundle() and load("state.json", {}).get("mb_sha") != meta.get("sha") + self.mailbox.url:
+            with contextlib.suppress(Exception):
+                self.mailbox.publish(meta, my_bundle())
+                with locked():
+                    st = load("state.json", {})
+                    st["mb_sha"] = meta.get("sha") + self.mailbox.url
+                    save("state.json", st)
         return changed
 
     def gather(self, use_mailbox: bool) -> dict:
@@ -786,9 +796,9 @@ class Sync:
             git("update-ref", PEERS + u, m["sha"])
             team[u] = {"meta": m, "via": src.name}
         for u in team:
-            team[u]["online"] = u in online
-            if u in online:
-                team[u]["seen"] = online[u].get("last_ok")
+            relay_seen = team[u]["meta"].get("seen") or 0
+            team[u]["online"] = u in online or ms() - relay_seen < 60_000
+            team[u]["seen"] = max(online.get(u, {}).get("last_ok", 0), relay_seen) or team[u].get("seen")
         save("team_cache.json", team)
         return team
 
@@ -834,17 +844,25 @@ class Sync:
             items.append({"key": f["key"], "kind": "new",
                           "text": f"{f['icon']} {f['head']}\n   {f['detail']}\n   {f['verdict']}\n   What to do: {f['ai']}"})
             if f.get("team") and f.get("poster") == self.c["name"]:
-                self.post_team(f["team"])
+                self.post_team(f)
         for f in flipped:
             push_feed(f"↺ {f['head']}  now {f['verdict']}")
             items.append({"key": f["key"] + "|flip", "kind": "msg",
                           "text": f"↺ the verdict changed: {f['head']}\n   now {f['verdict']}\n   What to do: {f['ai']}"})
         for f in gone:
             push_feed(f"✓ resolved: {f['head']}")
+            if f.get("team") and f.get("poster") == self.c["name"]:
+                self.post_team(f, resolved=True)
             items.append({"key": f["key"], "kind": "resolved", "text": f"✓ resolved: {f['head']}"})
         push_inbox(items)
 
-    def post_team(self, text: str) -> None:
+    def post_team(self, f: dict, resolved: bool = False) -> None:
+        text = ("✓ resolved: " + f["team"].lstrip("⚠✖ ")) if resolved else f["team"]
+        if self.mailbox:
+            with contextlib.suppress(Exception):
+                self.mailbox.send({"from": self.c["name"], "to": "team", "text": text,
+                                   "kind": "resolved" if resolved else "finding", "key": f["key"],
+                                   "fixer": f.get("fixer", ""), "parties": f.get("parties", [])})
         if self.c.get("discord"):
             with contextlib.suppress(Exception):
                 body = json.dumps({"content": f"**concord** · {text}"[:1900], "allowed_mentions": {"parse": []}}).encode()
@@ -852,23 +870,21 @@ class Sync:
                                              headers={"content-type": "application/json",
                                                       "user-agent": f"concord-team/{VERSION}"})
                 urllib.request.urlopen(req, timeout=8).read()
-        elif self.mailbox:
-            with contextlib.suppress(Exception):
-                self.mailbox.send({"from": self.c["name"], "to": "team", "text": text, "kind": "finding"})
 
     def mailbox_messages(self) -> None:
         if not self.mailbox:
             return
         st = load("state.json", {})
         try:
-            msgs = self.mailbox.messages(st.get("msg_since", 0))
+            cursor = f"msg_since:{self.mailbox.url}"
+            msgs = self.mailbox.messages(st.get(cursor, 0))
         except Exception:
             return
         if msgs:
-            receive_messages([m for m in msgs if m.get("from") != self.c["name"] and m.get("kind") != "finding"])
+            receive_messages([m for m in msgs if m.get("from") != self.c["name"] and m.get("kind") not in ("finding", "resolved")])
             with locked():
                 st = load("state.json", {})
-                st["msg_since"] = max([st.get("msg_since", 0)] + [m["at"] for m in msgs])
+                st[cursor] = max([st.get(cursor, 0)] + [m["at"] for m in msgs])
                 save("state.json", st)
 
     def round(self, force_pull: bool = False) -> None:
@@ -877,7 +893,7 @@ class Sync:
         if t - self.last["discover"] > (DISCOVER_EVERY if self.peers.online() else 10):
             self.peers.discover()
             self.last["discover"] = t
-        use_mb = bool(self.mailbox) and t - self.last["mailbox"] > MAILBOX_POLL
+        use_mb = bool(self.mailbox) and t - self.last["mailbox"] > self.c["mailbox"].get("poll", MAILBOX_POLL)
         if changed or force_pull or use_mb or t - self.last["poll"] > PEER_POLL:
             team = self.gather(use_mb)
             self.deliver(self.analyse(team))
@@ -949,7 +965,7 @@ def render(c: dict, live: bool = False) -> str:
     net = [f"tailnet {green('●') if ts else dim('○')} {'on' if ts else 'off'}",
            f"{online} teammate{'s' if online != 1 else ''} online"]
     if c.get("mailbox"):
-        net.append("mailbox " + cyan("●"))
+        net.append(("relay " if "vercel.app" not in c["mailbox"]["url"] else "mailbox ") + cyan("●"))
     if c.get("discord"):
         net.append("discord " + cyan("●"))
     L.append(" " + dim(" · ").join(net))
@@ -985,6 +1001,438 @@ def render(c: dict, live: bool = False) -> str:
         L.append("")
         L.append(dim(" concord-team say <name> <message> · concord-team urgent on · ctrl-c to stop"))
     return "\n".join(L)
+
+
+# ------------------------------------------------------------------ relay
+
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+class Relay:
+    """The always-online team member: stores everyone's latest work and messages
+    (the same API as the Vercel mailbox, on disk) and runs the Discord bot."""
+
+    def __init__(self, data: str, key: str):
+        self.data = data
+        self.key = key
+        self.lock = threading.RLock()
+        self.discord = Discord(self)
+
+    def pdir(self, project: str, *sub: str) -> str:
+        p = os.path.join(self.data, "projects", project, *sub)
+        os.makedirs(p, exist_ok=True)
+        return p
+
+    def projects(self) -> list[str]:
+        root = os.path.join(self.data, "projects")
+        return sorted(os.listdir(root)) if os.path.isdir(root) else []
+
+    def jload(self, path: str, default):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return default
+
+    def jsave(self, path: str, data) -> None:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+
+    # -- the mailbox API
+    def put_snapshot(self, project: str, user: str, meta: dict, bundle: bytes) -> None:
+        with self.lock:
+            bpath = os.path.join(self.pdir(project, "bundles"), f"{user}.bundle")
+            with open(bpath + ".tmp", "wb") as f:
+                f.write(bundle)
+            os.replace(bpath + ".tmp", bpath)
+            m = {k: meta.get(k) for k in ("sha", "base", "branch", "files", "symbols", "tool", "urgent", "at", "version")}
+            m["user"], m["received"] = user, ms()
+            self.jsave(os.path.join(self.pdir(project, "meta"), f"{user}.json"), m)
+
+    def seen(self, project: str, user: str) -> None:
+        with self.lock:
+            path = os.path.join(self.pdir(project), "seen.json")
+            s = self.jload(path, {})
+            s[user] = ms()
+            self.jsave(path, s)
+
+    def state(self, project: str) -> dict:
+        out = {}
+        seen = self.jload(os.path.join(self.pdir(project), "seen.json"), {})
+        mdir = self.pdir(project, "meta")
+        for fn in os.listdir(mdir):
+            if fn.endswith(".json"):
+                m = self.jload(os.path.join(mdir, fn), None)
+                if m:
+                    m["seen"] = seen.get(m["user"], m.get("received"))
+                    out[m["user"]] = m
+        return out
+
+    def bundle(self, project: str, user: str, sha: str) -> bytes | None:
+        m = self.jload(os.path.join(self.pdir(project, "meta"), f"{user}.json"), {})
+        if m.get("sha") != sha:
+            return None
+        with contextlib.suppress(OSError), open(os.path.join(self.pdir(project, "bundles"), f"{user}.bundle"), "rb") as f:
+            return f.read()
+        return None
+
+    def put_message(self, project: str, m: dict) -> dict:
+        msg = {"from": str(m.get("from", ""))[:60], "to": str(m.get("to", ""))[:40], "text": str(m.get("text", ""))[:4000],
+               "kind": str(m.get("kind", "note"))[:20], "at": ms()}
+        for k in ("key", "fixer"):
+            if m.get(k):
+                msg[k] = str(m[k])[:300]
+        if isinstance(m.get("parties"), list):
+            msg["parties"] = [str(x)[:40] for x in m["parties"][:4]]
+        with self.lock:
+            path = os.path.join(self.pdir(project), "messages.json")
+            msgs = self.jload(path, [])
+            msgs.append(msg)
+            self.jsave(path, msgs[-1000:])
+            if msg["kind"] in ("finding", "resolved") and msg.get("key"):
+                fpath = os.path.join(self.pdir(project), "findings.json")
+                fs = self.jload(fpath, {})
+                fid = hashlib.sha1(msg["key"].encode()).hexdigest()[:12]
+                if msg["kind"] == "finding":
+                    fs[fid] = {"key": msg["key"], "text": msg["text"], "fixer": msg.get("fixer", ""),
+                               "parties": msg.get("parties", []), "at": msg["at"]}
+                else:
+                    fs.pop(fid, None)
+                self.jsave(fpath, fs)
+                msg["fid"] = fid
+        threading.Thread(target=self.discord.on_message, args=(project, msg), daemon=True).start()
+        return msg
+
+    def messages(self, project: str, user: str, since: int) -> list[dict]:
+        msgs = self.jload(os.path.join(self.pdir(project), "messages.json"), [])
+        return [m for m in msgs if m["at"] > since and m["to"] in (user, "team")]
+
+    def findings(self, project: str) -> dict:
+        return self.jload(os.path.join(self.pdir(project), "findings.json"), {})
+
+
+class Discord:
+    """Discord bot over HTTP interactions: slash commands, alert buttons, channel posts."""
+
+    API = "https://discord.com/api/v10"
+
+    def __init__(self, relay: Relay):
+        self.relay = relay
+        self.app = os.environ.get("DISCORD_APP_ID", "")
+        self.public_key = os.environ.get("DISCORD_PUBLIC_KEY", "")
+        self.token = os.environ.get("DISCORD_BOT_TOKEN", "")
+        self.guild = os.environ.get("DISCORD_GUILD_ID", "")
+        self.enabled = bool(self.app and self.public_key and self.token)
+
+    def cfg_path(self) -> str:
+        return os.path.join(self.relay.data, "discord.json")
+
+    def cfg(self) -> dict:
+        return self.relay.jload(self.cfg_path(), {"channels": {}, "links": {}})
+
+    def save_cfg(self, c: dict) -> None:
+        with self.relay.lock:
+            self.relay.jsave(self.cfg_path(), c)
+
+    def verify(self, sig: str, ts: str, body: bytes) -> bool:
+        try:
+            from nacl.signing import VerifyKey
+            VerifyKey(bytes.fromhex(self.public_key)).verify(ts.encode() + body, bytes.fromhex(sig))
+            return True
+        except Exception:
+            return False
+
+    def api(self, method: str, path: str, body=None):
+        req = urllib.request.Request(
+            self.API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+            headers={"authorization": f"Bot {self.token}", "content-type": "application/json",
+                     "user-agent": f"DiscordBot (https://github.com/lucas-rus/concord, {VERSION})"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+        return json.loads(data) if data else None
+
+    def register(self) -> str:
+        if not self.enabled:
+            return "discord: off (set DISCORD_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN)"
+        s = lambda n, d, req=False: {"type": 3, "name": n, "description": d, "required": req}
+        cmd = [{"name": "team", "description": "Concord team: who is working on what, and clashes", "options": [
+            {"type": 1, "name": "status", "description": "Who is working on what, and open clashes"},
+            {"type": 1, "name": "clashes", "description": "Open clashes and who fixes them"},
+            {"type": 1, "name": "say", "description": "Message a teammate (their AI sees it too)",
+             "options": [s("to", "teammate name, or team", True), s("message", "what to say", True)]},
+            {"type": 1, "name": "iam", "description": "Link your Discord account to your team name",
+             "options": [s("name", "your concord-team name", True)]},
+            {"type": 1, "name": "here", "description": "Post this team's clashes in this channel",
+             "options": [s("project", "project (if the relay has several)")]},
+        ]}]
+        path = f"/applications/{self.app}/guilds/{self.guild}/commands" if self.guild else f"/applications/{self.app}/commands"
+        try:
+            self.api("PUT", path, cmd)
+            return f"discord: commands registered ({'guild ' + self.guild if self.guild else 'global, can take up to an hour'})"
+        except Exception as e:
+            return f"discord: could not register commands: {e}"
+
+    def project_for(self, channel: str | None, wanted: str | None = None) -> str | None:
+        projects = self.relay.projects()
+        if wanted:
+            return next((p for p in projects if p == wanted or p.startswith(wanted + "-")), None)
+        bound = {v: k for k, v in self.cfg()["channels"].items()}
+        if channel in bound:
+            return bound[channel]
+        if len(projects) == 1:
+            return projects[0]
+        recent = sorted(projects, key=lambda p: os.path.getmtime(self.relay.pdir(p)), reverse=True)
+        return recent[0] if recent else None
+
+    def status_text(self, project: str) -> str:
+        st = self.relay.state(project)
+        team = project.rsplit("-", 1)[0]
+        L = [f"**concord team · {team}** · {len(st)} {'person' if len(st) == 1 else 'people'}"]
+        for u, m in sorted(st.items()):
+            on = ms() - (m.get("seen") or 0) < 90_000
+            urgent = " · 🔴 urgent" if m.get("urgent") else ""
+            L.append(f"{'🟢' if on else '⚪'} **{u}** ({m.get('tool') or '?'}) · `{m.get('branch')}` · "
+                     f"{working_on(m)} · changed {ago(m.get('at'))}{urgent}")
+        L.append(self.clashes_text(project))
+        return "\n".join(L)[:1990]
+
+    def clashes_text(self, project: str) -> str:
+        fs = self.relay.findings(project)
+        if not fs:
+            return "✅ no clashes"
+        return "\n".join([f"**Clashes ({len(fs)})**"] + [f"• {f['text']}" for f in fs.values()])[:1500]
+
+    def buttons(self, fid: str) -> list:
+        return [{"type": 1, "components": [
+            {"type": 2, "style": 1, "label": "I'm on it", "custom_id": f"onit:{fid}"},
+            {"type": 2, "style": 2, "label": "Ask them to fix it", "custom_id": f"ask:{fid}"}]}]
+
+    def on_message(self, project: str, msg: dict) -> None:
+        if not self.enabled:
+            return
+        ch = self.cfg()["channels"].get(project)
+        if not ch:
+            return
+        try:
+            if msg["kind"] == "finding":
+                self.api("POST", f"/channels/{ch}/messages", {"content": msg["text"][:1900],
+                         "components": self.buttons(msg.get("fid", "")), "allowed_mentions": {"parse": []}})
+            elif msg["kind"] == "resolved":
+                self.api("POST", f"/channels/{ch}/messages", {"content": msg["text"][:1900], "allowed_mentions": {"parse": []}})
+            elif msg["to"] == "team" and msg["kind"] == "note" and not msg["from"].endswith("(discord)"):
+                self.api("POST", f"/channels/{ch}/messages", {"content": f"✉ **{msg['from']}**: {msg['text']}"[:1900],
+                         "allowed_mentions": {"parse": []}})
+        except Exception as e:
+            print("discord post failed:", e, flush=True)
+
+    def interaction(self, d: dict) -> dict:
+        if d.get("type") == 1:
+            return {"type": 1}
+        user = (d.get("member") or {}).get("user") or d.get("user") or {}
+        uid = user.get("id", "")
+        display = user.get("global_name") or user.get("username") or "someone"
+        links = self.cfg()["links"]
+        me = links.get(uid)
+        reply = lambda text, private=False: {"type": 4, "data": {"content": text[:1990], "flags": 64 if private else 0,
+                                                                  "allowed_mentions": {"parse": []}}}
+        if d.get("type") == 3:  # a button
+            action, _, fid = (d.get("data") or {}).get("custom_id", "").partition(":")
+            project = self.project_for(d.get("channel_id"))
+            f = self.relay.findings(project).get(fid) if project else None
+            if not f:
+                return reply("That clash is already resolved. ✅", True)
+            who = me or f"{display} (discord)"
+            if action == "onit":
+                for p in f.get("parties", []):
+                    if p != me and p != "main":
+                        self.relay.put_message(project, {"from": who, "to": p, "kind": "note",
+                                                         "text": f"I'm on it: {f['text']}"})
+                return reply(f"✋ **{who}** is on it: {f['text']}")
+            if action == "ask":
+                fixer = f.get("fixer") or ""
+                if fixer and fixer != "main":
+                    self.relay.put_message(project, {"from": who, "to": fixer, "kind": "note",
+                                                     "text": f"Please fix this clash: {f['text']}"})
+                return reply(f"📨 asked **{fixer or 'the fixer'}** to fix it: {f['text']}")
+            return reply("Unknown button.", True)
+        data = d.get("data") or {}
+        sub = (data.get("options") or [{}])[0]
+        opts = {o["name"]: o.get("value") for o in sub.get("options") or []}
+        name = sub.get("name")
+        if name == "iam":
+            n = slug(str(opts.get("name", "")), 20)
+            c = self.cfg()
+            c["links"][uid] = n
+            self.save_cfg(c)
+            return reply(f"Linked: you are **{n}** in concord-team.", True)
+        project = self.project_for(d.get("channel_id"), opts.get("project") if name == "here" else None)
+        if not project:
+            return reply("No team has synced with this relay yet: run `concord-team relay <url> <key>` in a clone.", True)
+        if name == "here":
+            c = self.cfg()
+            c["channels"][project] = d.get("channel_id")
+            self.save_cfg(c)
+            return reply(f"📌 Clashes of **{project.rsplit('-', 1)[0]}** will be posted here.")
+        if name == "status":
+            return reply(self.status_text(project))
+        if name == "clashes":
+            return reply(self.clashes_text(project))
+        if name == "say":
+            to = str(opts.get("to", "")).strip()
+            to = "team" if to == "team" else slug(to, 40)
+            who = me or f"{display} (discord)"
+            self.relay.put_message(project, {"from": who, "to": to, "kind": "note", "text": str(opts.get("message", ""))})
+            return reply(f"✉ **{who}** → **{to}**: {opts.get('message', '')}")
+        return reply("Unknown command.", True)
+
+
+class RelayHandler(http.server.BaseHTTPRequestHandler):
+    server_version = f"concord-team-relay/{VERSION}"
+    relay: Relay = None  # type: ignore[assignment]
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code: int, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("content-type", ctype)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _body(self, limit: int) -> bytes | None:
+        n = int(self.headers.get("content-length") or 0)
+        if n > limit:
+            self._send(413, {"error": "too large"})
+            return None
+        return self.rfile.read(n)
+
+    def _api(self):
+        """(path, query, project) for an authorised API call, or None after answering."""
+        u = urllib.parse.urlparse(self.path)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+        got = (self.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(got.encode(), self.relay.key.encode()):
+            self._send(401, {"error": "unauthorized"})
+            return None
+        project = q.get("project", "")
+        if not NAME_RE.match(project):
+            self._send(400, {"error": "bad project"})
+            return None
+        return u.path, q, project
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path in ("/", "/healthz"):
+            return self._send(200, f"concord-team relay {VERSION}\n".encode(), "text/plain")
+        r = self._api()
+        if not r:
+            return
+        path, q, project = r
+        if path == "/api/state":
+            return self._send(200, {"users": self.relay.state(project), "now": ms()})
+        if path == "/api/snapshot":
+            user, sha = q.get("user", ""), q.get("sha", "")
+            b = self.relay.bundle(project, user, sha) if NAME_RE.match(user) and SHA_RE.match(sha) else None
+            return self._send(200, b, "application/octet-stream") if b else self._send(404, {"error": "no such snapshot"})
+        if path == "/api/message":
+            user = q.get("user", "")
+            if not NAME_RE.match(user):
+                return self._send(400, {"error": "bad user"})
+            self.relay.seen(project, user)
+            return self._send(200, {"messages": self.relay.messages(project, user, int(q.get("since") or 0)), "now": ms()})
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path == "/discord/interactions":
+            body = self._body(1 << 20)
+            if body is None:
+                return
+            dc = self.relay.discord
+            if not dc.enabled or not dc.verify(self.headers.get("x-signature-ed25519", ""),
+                                               self.headers.get("x-signature-timestamp", ""), body):
+                return self._send(401, {"error": "bad signature"})
+            try:
+                return self._send(200, dc.interaction(json.loads(body)))
+            except Exception as e:
+                print("discord interaction failed:", e, flush=True)
+                return self._send(200, {"type": 4, "data": {"content": "Something went wrong.", "flags": 64}})
+        r = self._api()
+        if not r:
+            return
+        path, q, project = r
+        if path == "/api/snapshot":
+            user = q.get("user", "")
+            try:
+                meta = json.loads(base64.b64decode(self.headers.get("x-concord-meta", "")))
+            except ValueError:
+                return self._send(400, {"error": "bad meta"})
+            if not NAME_RE.match(user) or not SHA_RE.match(str(meta.get("sha", ""))):
+                return self._send(400, {"error": "bad user or sha"})
+            body = self._body(50 << 20)
+            if not body:
+                return
+            self.relay.put_snapshot(project, user, meta, body)
+            self.relay.seen(project, user)
+            return self._send(200, {"ok": True})
+        if path == "/api/message":
+            body = self._body(65536)
+            if body is None:
+                return
+            try:
+                m = json.loads(body)
+            except ValueError:
+                return self._send(400, {"error": "bad json"})
+            if not m.get("from") or not m.get("to") or not m.get("text"):
+                return self._send(400, {"error": "from, to and text are required"})
+            msg = self.relay.put_message(project, m)
+            return self._send(200, {"ok": True, "at": msg["at"]})
+        self._send(404, {"error": "not found"})
+
+
+def cmd_serve(a):
+    key = os.environ.get("RELAY_KEY", "")
+    if len(key) < 16:
+        sys.exit("set RELAY_KEY (16+ random characters): the key teammates use to reach this relay")
+    os.makedirs(a.data, exist_ok=True)
+    relay = Relay(a.data, key)
+    RelayHandler.relay = relay
+    port = int(os.environ.get("PORT") or a.port)
+    srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), RelayHandler)
+    srv.daemon_threads = True
+    print(f"concord-team relay {VERSION} on :{port}, data in {a.data}", flush=True)
+    print(relay.discord.register(), flush=True)
+    srv.serve_forever()
+
+
+DEFAULT_RELAY = os.path.expanduser("~/.config/concord-team/relay.json")
+
+
+def cmd_relay(a):
+    relay = {"url": a.url.rstrip("/"), "key": a.key, "poll": 8}
+    if a.default:
+        os.makedirs(os.path.dirname(DEFAULT_RELAY), exist_ok=True)
+        fd = os.open(DEFAULT_RELAY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(relay, f)
+        print(f"{green('✓')} saved as your default relay: teams you `init` from now on use it")
+        if not config(False):
+            return
+    c = config()
+    c["mailbox"] = relay
+    save("team.json", c)
+    try:
+        Mailbox(c).states()
+        print(f"{green('✓')} relay {a.url} reachable; this clone now syncs through it too")
+    except Exception as e:
+        print(f"{yellow('!')} saved, but the relay did not answer: {e}")
+    print("New invites (`concord-team invite`) include it. Teammates who joined earlier run the same command.")
 
 
 # ---------------------------------------------------------------- commands
@@ -1033,6 +1481,9 @@ def cmd_init(a):
         if not a.mailbox_key:
             sys.exit("--mailbox needs --mailbox-key")
         c["mailbox"] = {"url": a.mailbox, "key": a.mailbox_key}
+    elif os.path.exists(DEFAULT_RELAY):
+        with open(DEFAULT_RELAY) as f:
+            c["mailbox"] = json.load(f)
     if a.discord:
         c["discord"] = a.discord
     save("team.json", c)
@@ -1378,6 +1829,15 @@ def main():
     s.add_argument("client", choices=["claude"])
     s.set_defaults(f=cmd_setup)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
+    s = sub.add_parser("relay", help="sync through an always-online relay too (url key)")
+    s.add_argument("url")
+    s.add_argument("key")
+    s.add_argument("--default", action="store_true", help="also use it for teams you init later")
+    s.set_defaults(f=cmd_relay)
+    s = sub.add_parser("serve", help="run the always-online relay and Discord bot (for a server)")
+    s.add_argument("--data", default="./concord-relay-data")
+    s.add_argument("--port", type=int, default=8080)
+    s.set_defaults(f=cmd_serve)
     sub.add_parser("hook", help=argparse.SUPPRESS).set_defaults(f=cmd_hook)
     sub.add_parser("statusline", help=argparse.SUPPRESS).set_defaults(f=cmd_statusline)
     a = p.parse_args()

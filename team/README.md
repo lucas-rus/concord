@@ -83,8 +83,31 @@ The verdict also says *how*. For example, "give `prefix` a default so old calls 
 
 Work in progress goes only to your teammates' laptops, over Tailscale's encrypted connections. Every request needs the team key. No server is involved unless you add the optional mailbox (`team/mailbox`, a small Vercel app for teammates who are never online at the same time).
 
+## Always-online relay and Discord bot
+
+Laptops sync directly over Tailscale while both are online. A relay keeps the team's latest work and messages for whoever is offline, and runs a Discord bot. It is the same program in server mode, with a `Dockerfile` here:
+
+```bash
+railway init --name concord-team && railway add -s relay
+railway variable set RELAY_KEY --stdin -s relay <<< "$(openssl rand -base64 32)"
+railway volume add -m /data && railway up -s relay -d && railway domain -s relay
+concord-team relay https://<your-domain> <RELAY_KEY> --default   # new invites include it
+```
+
+Any Docker host works the same way (`concord-team serve` with `RELAY_KEY` set and a `/data` volume).
+
+**Discord bot.** Create an application in the [Discord developer portal](https://discord.com/developers/applications) and set `DISCORD_APP_ID`, `DISCORD_PUBLIC_KEY` and `DISCORD_BOT_TOKEN` on the relay (and `DISCORD_GUILD_ID` for instant command updates). Set the app's *Interactions Endpoint URL* to `https://<your-domain>/discord/interactions`, then invite the bot to your server. Commands:
+
+| Command | What it does |
+|---|---|
+| `/team here` | post this team's clashes in this channel, each with **I'm on it** / **Ask them to fix it** buttons |
+| `/team status` | who is working on what (online or not), and open clashes |
+| `/team clashes` | open clashes and who fixes each |
+| `/team say <name> <message>` | message a teammate; their AI sees it too |
+| `/team iam <name>` | link your Discord account to your team name |
+
 ## Optional extras
 
-- **Discord:** `concord-team init --discord <webhook-url>` posts breaking changes and same-line clashes to a channel, once per clash.
-- **Mailbox:** `concord-team init --mailbox <url> --mailbox-key <key>`: store-and-forward through the Vercel app in `team/mailbox` (`vercel deploy` it with a `TEAM_TOKEN` env var and a private Blob store).
+- **Discord webhook (no bot):** `concord-team init --discord <webhook-url>` posts clashes to a channel.
+- **Vercel mailbox:** a serverless alternative to the relay in `team/mailbox` (messages and snapshots only, no bot).
 - **Windows:** use WSL2 (Ubuntu), install Homebrew for Linux and Tailscale inside it, then follow the steps above.
