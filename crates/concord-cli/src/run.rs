@@ -130,6 +130,11 @@ const TRANSPORT_CONTINUE: &str = "The connection to the model provider was lost 
 Nothing you did was lost. Continue the task exactly where you left off.";
 
 /// Markers of transport failures in an OpenCode error event.
+/// How long agents may wait in total for the machine to come back online.
+const NETWORK_WAIT_MAX: Duration = Duration::from_secs(30 * 60);
+/// How often to check whether the network is back.
+const NETWORK_POLL: Duration = Duration::from_secs(5);
+
 const TRANSPORT_MARKERS: &[&str] = &[
     "provider.transport",
     "enotfound",
@@ -153,6 +158,34 @@ fn ended_on_transport_error(log: &Path) -> bool {
         && TRANSPORT_MARKERS
             .iter()
             .any(|m| last.to_string().to_lowercase().contains(m))
+}
+
+/// The host a transport error could not reach, when its message names one
+/// (`getaddrinfo ENOTFOUND opencode.ai`).
+fn unreachable_host(log: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    text.lines().rev().find_map(|l| {
+        let i = l.find("ENOTFOUND ")?;
+        let host: String = l[i + "ENOTFOUND ".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+            .collect();
+        (host.contains('.')).then_some(host)
+    })
+}
+
+/// Wait until `host` resolves again (the machine is back online), checking
+/// every few seconds, for at most `max`. Returns how long it waited.
+fn wait_for_host(host: &str, max: Duration) -> Duration {
+    use std::net::ToSocketAddrs;
+    let start = Instant::now();
+    while start.elapsed() < max {
+        if (host, 443).to_socket_addrs().is_ok_and(|mut a| a.next().is_some()) {
+            break;
+        }
+        std::thread::sleep(NETWORK_POLL);
+    }
+    start.elapsed()
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -487,6 +520,7 @@ impl OpencodeJob {
         let mut last_text = String::new();
         let mut error = false;
         let mut transport_retries = 0u32;
+        let mut network_waited = Duration::ZERO;
         while turns < self.max_turns.max(OPENCODE_MAX_TURNS) + transport_retries {
             turns += 1;
             let model = turn_model(&self.model, &self.gate_model, self.first_is_gate, turns).to_owned();
@@ -509,6 +543,28 @@ impl OpencodeJob {
                     self.log_prefix.display()
                 )))
             {
+                let log = PathBuf::from(format!("{}.turn{turns}.jsonl", self.log_prefix.display()));
+                // The machine went offline (the host does not resolve): wait
+                // until it is back instead of spending resume attempts on it.
+                if let Some(host) = unreachable_host(&log)
+                    && network_waited < NETWORK_WAIT_MAX
+                {
+                    let waited = wait_for_host(&host, NETWORK_WAIT_MAX - network_waited);
+                    network_waited += waited;
+                    if let Ok(mut st) = self.shared.lock() {
+                        st.log(
+                            "network_wait",
+                            json!({ "agent": self.name, "host": host, "seconds": waited.as_secs() }),
+                        );
+                    }
+                    if waited > NETWORK_POLL {
+                        // It was down and is back: resume without counting
+                        // this attempt (turns are not used up either).
+                        turns -= 1;
+                        message = TRANSPORT_CONTINUE.to_owned();
+                        continue;
+                    }
+                }
                 transport_retries += 1;
                 if let Ok(mut st) = self.shared.lock() {
                     st.log(
@@ -1411,6 +1467,20 @@ pub fn render(r: &RunReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreachable_host_is_read_from_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("a.0.turn1.jsonl");
+        std::fs::write(
+            &log,
+            "{\"type\":\"step_start\"}\n{\"type\":\"error\",\"error\":{\"message\":\"getaddrinfo ENOTFOUND opencode.ai\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(unreachable_host(&log).as_deref(), Some("opencode.ai"));
+        std::fs::write(&log, "{\"type\":\"error\",\"error\":{\"message\":\"ECONNRESET\"}}\n").unwrap();
+        assert_eq!(unreachable_host(&log), None);
+    }
 
     #[test]
     fn gate_turns_use_the_gate_model() {
