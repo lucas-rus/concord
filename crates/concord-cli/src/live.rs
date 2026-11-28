@@ -1087,6 +1087,11 @@ fn lean_handoff<'a>(
             return (st, LeanHandoff::Turn(String::new()));
         }
     };
+    // What the hand-off brought in, for the message: the agent would
+    // otherwise spend its first steps on `git log` / `git diff`.
+    let incoming = Repo::open(&wt)
+        .and_then(|r| r.git(&["diff", "--stat", "--stat-width=100", &before]))
+        .unwrap_or_default();
     let mut st = shared.lock().expect("state");
     let Ok((before_ok, before_text)) = prior else {
         return (st, LeanHandoff::Turn(String::new()));
@@ -1125,6 +1130,35 @@ fn lean_handoff<'a>(
         return (st, LeanHandoff::Silent);
     }
     let mut extra = String::new();
+    let stat: Vec<&str> = incoming.lines().collect();
+    if !stat.is_empty() {
+        extra.push_str("\nWhat came in (`git diff --stat` against your work before the merge):\n");
+        for l in stat.iter().take(HANDOFF_STAT_LINES) {
+            extra.push_str(&format!("  {}\n", l.trim()));
+        }
+        if stat.len() > HANDOFF_STAT_LINES {
+            extra.push_str(&format!("  ... and {} more lines\n", stat.len() - HANDOFF_STAT_LINES));
+        }
+    }
+    if broken.is_empty() && !after_ok {
+        // Nothing broke, but the agent yielded lines it may have to rewrite:
+        // give it the state of its check so it does not re-run it to find out.
+        extra.push_str(&format!(
+            "\nConcord ran your acceptance check (`{cmd}`) on the merged code: {} failing:\n",
+            after_fail.len().max(1)
+        ));
+        for t in after_fail.iter().take(20) {
+            extra.push_str(&format!("  {t}\n"));
+        }
+        if after_fail.len() > 20 {
+            extra.push_str(&format!("  ... and {} more\n", after_fail.len() - 20));
+        }
+        extra.push_str(&format!(
+            "Assertion details:\n{}\nThese also failed before the merge. Re-apply any change your feature needs \
+             on top of their version, run the check, then finish.",
+            assertion_excerpt(&after_text, 30)
+        ));
+    }
     if !broken.is_empty() {
         extra.push_str("\nConcord ran your acceptance check: these tests passed before the merge and fail now:\n");
         for t in broken.iter().take(20) {
@@ -1137,6 +1171,9 @@ fn lean_handoff<'a>(
     }
     (st, LeanHandoff::Turn(extra))
 }
+
+/// Lines of `git diff --stat` shown in a hand-off message.
+const HANDOFF_STAT_LINES: usize = 15;
 
 /// The ticket's acceptance check at the finish gate.
 fn check_gate<'a>(

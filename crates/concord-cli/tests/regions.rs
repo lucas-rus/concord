@@ -533,6 +533,8 @@ fn lean_hand_off_that_breaks_a_test_gets_a_turn() {
     let (decision, _) = lean_scenario(true, "! grep -q 'def d' m.py");
     let reason = decision.expect("turn");
     assert!(reason.contains("passed before the merge and fail now"), "{reason}");
+    // The message says what came in, so the agent need not look it up.
+    assert!(reason.contains("What came in") && reason.contains("m.py"), "{reason}");
 }
 
 /// A region hand-off that left git's conflict markers in an agent's worktree
