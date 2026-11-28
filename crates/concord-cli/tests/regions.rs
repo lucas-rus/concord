@@ -724,3 +724,61 @@ fn lean_contract_resume_merges_before_the_turn() {
         }
     }
 }
+
+/// Lean progress rule for contracts: held again with exactly the same
+/// problems after a turn, the agent is not held a third time; the contract is
+/// accepted with a warning and the merged code is tested later.
+#[test]
+fn lean_non_conforming_without_progress_is_not_held_again() {
+    for lean in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        fs::write(root.join("m.py"), "def g(x, y=0):\n    return x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        let repo = Repo::open(&root).unwrap();
+        let base = repo.rev_parse("HEAD").unwrap();
+        let mut st = State::new(
+            repo.clone(),
+            base.clone(),
+            Mode::Enforce,
+            None,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        st.lean = lean;
+        let shared: Shared = Arc::new(Mutex::new(st));
+        let mut wts = Vec::new();
+        for name in ["producer", "consumer"] {
+            let wt = tmp.path().join("wt").join(name);
+            repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+            shared
+                .lock()
+                .unwrap()
+                .add_agent(name, wt.clone(), format!("b/{name}"), "task");
+            wts.push(wt);
+        }
+        let user = wts[1].join("u.py");
+        fs::write(&user, "from m import g\n\n\ndef c():\n    return g(3)\n").unwrap();
+        live::handle(
+            &shared,
+            "consumer",
+            "PostToolUse",
+            &json!({ "session_id": "s-consumer", "tool_name": "Write", "tool_input": { "file_path": user.to_string_lossy() } }),
+        );
+        read(&shared, "consumer", &wts[1]);
+        assert_eq!(stop(&shared, "consumer"), None);
+        edit(&shared, "producer", &wts[0], "def g(x, y):\n    return x\n");
+        assert_eq!(stop(&shared, "producer"), None);
+        // Held for the call site; the agent changes nothing and tries again.
+        assert!(stop(&shared, "consumer").is_some());
+        let again = stop(&shared, "consumer");
+        if lean {
+            assert_eq!(again, None, "no third hold without progress");
+        } else {
+            assert!(again.is_some(), "the previous gate holds again");
+        }
+    }
+}

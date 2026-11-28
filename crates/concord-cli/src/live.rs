@@ -120,6 +120,9 @@ pub struct AgentInfo {
     pub check: Option<String>,
     /// Failures of the last acceptance check that sent the agent back.
     pub check_failures: Option<usize>,
+    /// The last non-conforming verdict (contracts and their problems), for
+    /// the lean progress rule.
+    pub last_nonconforming: Option<String>,
     /// Baseline outcome `(passed_alone, failing_ids)` of this agent's `check`
     /// recorded when it finishes, used to protect finished peers from regressions.
     pub check_baseline: Option<(bool, BTreeSet<String>)>,
@@ -261,6 +264,7 @@ impl State {
                 check: None,
                 check_failures: None,
                 check_baseline: None,
+                last_nonconforming: None,
                 peer_check_blocks: 0,
             },
         );
@@ -2079,11 +2083,40 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             }
         }
         reason.push_str("Update these call sites (and any tests that use them), run the test suite, then finish.");
+        // Lean progress rule (as for the acceptance check): held again with
+        // exactly the same problems after a turn, the agent cannot fix them
+        // (or the verdict is wrong). Accept the contracts with a warning; the
+        // finished-peer check and the repair pass test the merged code.
+        let fingerprint = format!("{remaining:?}");
+        if st.lean
+            && st
+                .agents
+                .get(agent)
+                .and_then(|a| a.last_nonconforming.as_ref())
+                .is_some_and(|f| *f == fingerprint)
+        {
+            for s in remaining.keys() {
+                st.dir.acknowledge(&AgentId::new(agent), s);
+            }
+            st.log(
+                "contract_unresolved",
+                json!({ "agent": agent, "problems": remaining.iter().map(|(s, p)| (s.to_string(), p.clone())).collect::<BTreeMap<_, _>>() }),
+            );
+            if let Some(a) = st.agents.get_mut(agent) {
+                a.last_nonconforming = None;
+            }
+            drop(st);
+            continue;
+        }
         if let Some(a) = st.agents.get_mut(agent) {
             a.stats.gate_blocks += 1;
+            a.last_nonconforming = Some(fingerprint);
         }
         let _ = st.take_outbox(agent);
-        st.log("stop", json!({ "agent": agent, "decision": "block", "reason": "non_conforming", "symbols": remaining.keys().collect::<Vec<_>>() }));
+        st.log(
+            "stop",
+            json!({ "agent": agent, "decision": "block", "reason": "non_conforming", "symbols": remaining.keys().collect::<Vec<_>>(), "problems": remaining.values().map(|p| p.len()).sum::<usize>(), "detail": remaining.iter().map(|(s, p)| format!("{s}: {}", p.join("; "))).collect::<Vec<_>>() }),
+        );
         return (json!({ "decision": "block", "reason": reason }).to_string(), 0);
     }
 }
