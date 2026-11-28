@@ -68,6 +68,12 @@ pub struct RunConfig {
     pub lean: bool,
     /// Trim large transient tool outputs (OpenCode plugin, `opencode_plugin.js`).
     pub trim_outputs: bool,
+    /// Repair-pass turns start a new session (ticket plus failing tests)
+    /// instead of resuming the agent's whole conversation.
+    pub fresh_repairs: bool,
+    /// Model variant for gate turns and repairs (OpenCode `model#variant`),
+    /// e.g. a lower reasoning effort for short, focused fixes.
+    pub gate_variant: Option<String>,
     /// Structured merge driver executable (Mergiraf-compatible CLI).
     pub merge_driver: Option<String>,
     pub resume_rounds: u32,
@@ -420,6 +426,11 @@ fn spawn_opencode(
     let job = OpencodeJob {
         exe: cfg.opencode.clone(),
         model: cfg.model.clone(),
+        gate_model: match &cfg.gate_variant {
+            Some(v) => format!("{}#{v}", cfg.model.split('#').next().unwrap_or(&cfg.model)),
+            None => cfg.model.clone(),
+        },
+        first_is_gate: attempt > 0,
         // OpenCode has no hooks: the controller asks the gate after each turn
         // (in off mode it only runs the ticket's acceptance check, if any).
         gate: true,
@@ -443,9 +454,20 @@ fn spawn_opencode(
     })
 }
 
+/// The model of an OpenCode turn: the agent's first piece of work uses the
+/// main model; gate turns and repairs use the gate model (`--gate-variant`).
+fn turn_model<'a>(model: &'a str, gate_model: &'a str, first_is_gate: bool, turn: u32) -> &'a str {
+    if turn == 1 && !first_is_gate { model } else { gate_model }
+}
+
 struct OpencodeJob {
     exe: String,
     model: String,
+    /// Model for turns after an agent's first piece of work (gate turns and
+    /// repairs); the same as `model` unless `--gate-variant` is set.
+    gate_model: String,
+    /// The first turn is itself a gate turn (a resumed or repair attempt).
+    first_is_gate: bool,
     gate: bool,
     max_turns: u32,
     cfg_dir: PathBuf,
@@ -467,7 +489,8 @@ impl OpencodeJob {
         let mut transport_retries = 0u32;
         while turns < self.max_turns.max(OPENCODE_MAX_TURNS) + transport_retries {
             turns += 1;
-            let (sid, text, c, ok) = self.turn(turns, &message, session.as_deref());
+            let model = turn_model(&self.model, &self.gate_model, self.first_is_gate, turns).to_owned();
+            let (sid, text, c, ok) = self.turn(turns, &model, &message, session.as_deref());
             cost += c;
             if sid.is_some() {
                 session = sid;
@@ -526,10 +549,10 @@ impl OpencodeJob {
 
     /// One turn. Retries when OpenCode's server fails to start, which
     /// happens now and then when many agents start at the same moment.
-    fn turn(&self, n: u32, message: &str, session: Option<&str>) -> (Option<String>, String, f64, bool) {
+    fn turn(&self, n: u32, model: &str, message: &str, session: Option<&str>) -> (Option<String>, String, f64, bool) {
         let mut attempt = 0u64;
         loop {
-            let (r, startup_failed) = self.turn_once(n, message, session);
+            let (r, startup_failed) = self.turn_once(n, model, message, session);
             if !startup_failed || attempt >= OPENCODE_START_RETRIES {
                 return r;
             }
@@ -542,7 +565,13 @@ impl OpencodeJob {
 
     /// One `opencode run` invocation. Returns ((session id, final text, cost,
     /// ok), whether OpenCode's server failed to start).
-    fn turn_once(&self, n: u32, message: &str, session: Option<&str>) -> ((Option<String>, String, f64, bool), bool) {
+    fn turn_once(
+        &self,
+        n: u32,
+        model: &str,
+        message: &str,
+        session: Option<&str>,
+    ) -> ((Option<String>, String, f64, bool), bool) {
         let log = PathBuf::from(format!("{}.turn{n}.jsonl", self.log_prefix.display()));
         let err = PathBuf::from(format!("{}.turn{n}.err", self.log_prefix.display()));
         let (Ok(out_f), Ok(err_f)) = (std::fs::File::create(&log), std::fs::File::create(&err)) else {
@@ -558,7 +587,7 @@ impl OpencodeJob {
             .env("CONCORD_DAEMON_ADDR", &self.addr)
             .env("CONCORD_AGENT", &self.name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            .args(["run", "--standalone", "--auto", "--format", "json", "-m", &self.model]);
+            .args(["run", "--standalone", "--auto", "--format", "json", "-m", model]);
         if let Some(s) = session {
             cmd.args(["--session", s]);
         }
@@ -1165,6 +1194,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
                     live::assertion_excerpt(&ft.output, 35)
                 ));
                 eprintln!("  reconciling integrated acceptance check for {task_name} (round {round})");
+                let fresh_sid = uuid_v4();
                 running.push(spawn_agent(
                     cfg,
                     AgentCtx {
@@ -1174,8 +1204,24 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
                         shared: &shared,
                         addr: &addr,
                     },
-                    &msg,
-                    SessionArg::Resume(&sid),
+                    &if cfg.fresh_repairs {
+                        let ticket = cfg
+                            .tasks
+                            .iter()
+                            .find(|t| t.name == task_name)
+                            .map(|t| t.prompt.as_str())
+                            .unwrap_or("");
+                        format!(
+                            "You implemented this ticket in this repository (your work is committed here):\n\n{ticket}\n\n{msg}"
+                        )
+                    } else {
+                        msg.clone()
+                    },
+                    if cfg.fresh_repairs {
+                        SessionArg::New(&fresh_sid)
+                    } else {
+                        SessionArg::Resume(&sid)
+                    },
                     &agents_dir,
                     cfg.resume_rounds + round,
                 )?);
@@ -1337,6 +1383,13 @@ pub fn render(r: &RunReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_turns_use_the_gate_model() {
+        assert_eq!(turn_model("m", "m#none", false, 1), "m");
+        assert_eq!(turn_model("m", "m#none", false, 2), "m#none");
+        assert_eq!(turn_model("m", "m#none", true, 1), "m#none");
+    }
 
     #[test]
     fn opencode_events_skip_empty_session_ids() {

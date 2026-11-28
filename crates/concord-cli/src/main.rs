@@ -22,6 +22,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per invocation: the size of the `Run` variant does not matter.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// List symbol contracts and digests of source files or directories (Python, TS/JS, Rust, Go).
     Symbols {
@@ -231,6 +233,14 @@ enum Command {
         /// the full output is saved to a file the agent can search.
         #[arg(long)]
         trim_outputs: bool,
+        /// Repair-pass turns start a new session with the ticket and the
+        /// failing tests, instead of resuming the agent's whole conversation.
+        #[arg(long)]
+        fresh_repairs: bool,
+        /// OpenCode model variant for gate turns and repairs (e.g. `none` or
+        /// `low` reasoning effort); the agents' main work keeps `--model`.
+        #[arg(long)]
+        gate_variant: Option<String>,
         /// Structured merge driver for merges and conflict checks, e.g. `mergiraf`.
         #[arg(long)]
         merge_driver: Option<String>,
@@ -474,6 +484,8 @@ fn main() -> Result<()> {
             no_lean,
             lean: _,
             trim_outputs,
+            fresh_repairs,
+            gate_variant,
             merge_driver,
             resume_rounds,
             claude,
@@ -535,6 +547,8 @@ fn main() -> Result<()> {
                     fails_together,
                     lean: !no_lean,
                     trim_outputs,
+                    fresh_repairs,
+                    gate_variant: gate_variant.clone(),
                     merge_driver: merge_driver.clone(),
                     resume_rounds,
                     claude: claude.clone(),
