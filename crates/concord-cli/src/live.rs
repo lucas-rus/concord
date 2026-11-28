@@ -1986,6 +1986,17 @@ fn stop(shared: &Shared, agent: &str, input: &Value) -> (String, i32) {
             }
             let remaining = st.auto_ack(agent);
             let gate = st.dir.finish_gate(&AgentId::new(agent));
+            if remaining.is_empty() && gate.is_open() && st.lean {
+                // Lean: the call sites conform after the merge; the rest of
+                // the gate (regions, the acceptance check) verifies the merged
+                // code instead of an agent turn spent re-running the tests.
+                st.log(
+                    "stop",
+                    json!({ "agent": agent, "decision": "verified", "reason": "merge_conforms" }),
+                );
+                drop(st);
+                continue;
+            }
             if remaining.is_empty() && gate.is_open() {
                 let reason = format!(
                     "[concord] {} Your code already conforms to the changed contracts. Run the test suite once \

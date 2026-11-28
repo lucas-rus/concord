@@ -650,3 +650,77 @@ fn overlap_with_a_finished_owner_is_merged_with_markers() {
         "the owner's work is in the yielder's branch"
     );
 }
+
+/// Lean contract resumes: the gate is asked on a finished consumer's behalf
+/// first, so the producer's change is merged before the consumer's turn.
+/// The consumer then needs one turn to fix its call site, where the previous
+/// gate cost two (adapt, then "verify after merge").
+#[test]
+fn lean_contract_resume_merges_before_the_turn() {
+    for lean in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        fs::write(root.join("m.py"), "def g(x, y=0):\n    return x\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        let repo = Repo::open(&root).unwrap();
+        let base = repo.rev_parse("HEAD").unwrap();
+        let mut st = State::new(
+            repo.clone(),
+            base.clone(),
+            Mode::Enforce,
+            None,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        st.lean = lean;
+        let shared: Shared = Arc::new(Mutex::new(st));
+        let mut wts = Vec::new();
+        for name in ["producer", "consumer"] {
+            let wt = tmp.path().join("wt").join(name);
+            repo.worktree_add(&wt, &format!("b/{name}"), &base).unwrap();
+            shared
+                .lock()
+                .unwrap()
+                .add_agent(name, wt.clone(), format!("b/{name}"), "task");
+            wts.push(wt);
+        }
+        let user = wts[1].join("u.py");
+        let write_user = |call: &str| {
+            fs::write(&user, format!("from m import g\n\n\ndef c():\n    return {call}\n")).unwrap();
+            live::handle(
+                &shared,
+                "consumer",
+                "PostToolUse",
+                &json!({ "session_id": "s-consumer", "tool_name": "Write", "tool_input": { "file_path": user.to_string_lossy() } }),
+            );
+        };
+        write_user("g(3)");
+        read(&shared, "consumer", &wts[1]);
+        assert_eq!(stop(&shared, "consumer"), None);
+        edit(&shared, "producer", &wts[0], "def g(x, y):\n    return x\n");
+        assert_eq!(stop(&shared, "producer"), None);
+        assert!(shared.lock().unwrap().needs_resume("consumer").is_some());
+        if lean {
+            // run.rs asks the gate first: it merges the producer and holds the
+            // consumer for its call site only.
+            let reason = stop(&shared, "consumer").expect("held for the call site");
+            assert!(!reason.contains("once more"), "{reason}");
+            assert!(
+                fs::read_to_string(wts[1].join("m.py"))
+                    .unwrap()
+                    .contains("def g(x, y):")
+            );
+            write_user("g(3, 0)");
+            assert_eq!(stop(&shared, "consumer"), None, "one turn suffices");
+        } else {
+            // The previous gate: the consumer adapts first, then is held once
+            // more to verify after the merge.
+            write_user("g(3, 0)");
+            let reason = stop(&shared, "consumer").expect("verify after merge");
+            assert!(reason.contains("once more"), "{reason}");
+        }
+    }
+}

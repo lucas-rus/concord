@@ -986,6 +986,34 @@ pub fn run(cfg: &RunConfig) -> Result<RunReport> {
                 for n in names {
                     if let Some(msg) = st.needs_resume(&n) {
                         let sid = results.get(&n).map(|r| r.session_id.clone()).unwrap_or_default();
+                        // Lean: first ask the finish gate on the agent's
+                        // behalf. It merges the changed contract's finished
+                        // code, re-checks the call sites and runs the
+                        // acceptance check; the agent is resumed only if the
+                        // gate holds it, with the gate's reason.
+                        let msg = if cfg.lean {
+                            drop(st);
+                            let (out, _) = live::handle(&shared, &n, "Stop", &json!({ "session_id": sid }));
+                            st = shared.lock().expect("state");
+                            if out.trim().is_empty() {
+                                st.log("contract_resume_skipped", json!({ "agent": n, "round": round }));
+                                if let Some(a) = st.agents.get_mut(&n) {
+                                    a.status = Status::Finished;
+                                }
+                                continue;
+                            }
+                            let reason = serde_json::from_str::<Value>(&out)
+                                .ok()
+                                .and_then(|v| v.get("reason").and_then(Value::as_str).map(str::to_owned))
+                                .unwrap_or_default();
+                            if reason.is_empty() {
+                                msg
+                            } else {
+                                format!("{msg}\n{reason}")
+                            }
+                        } else {
+                            msg
+                        };
                         if !sid.is_empty() {
                             if let Some(a) = st.agents.get_mut(&n) {
                                 a.status = Status::Running;
