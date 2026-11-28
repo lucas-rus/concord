@@ -1072,23 +1072,23 @@ fn lean_handoff<'a>(
     };
     let (wt, repo) = (a.worktree.clone(), st.repo.clone());
     drop(st);
-    let run = |dir: &Path| {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .current_dir(dir)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .output()
-            .map(|o| {
-                let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
-                t.push_str(&String::from_utf8_lossy(&o.stderr));
-                (o.status.success(), t)
-            })
+    let timeout = crate::shell::check_timeout();
+    let after = crate::shell::run_shell_timeout(&cmd, &wt, timeout);
+    // If the post-merge check passes outright, every test passed and `broken`
+    // is empty — skip creating a temporary worktree to re-run `before`.
+    let (after_ok, after_text, prior) = match after {
+        Ok(o) if o.ok => (true, o.output, Ok((true, String::new()))),
+        Ok(o) => {
+            let p = crate::together::test_at(&repo, &before, &cmd);
+            (false, o.output, p)
+        }
+        Err(_) => {
+            let st = shared.lock().expect("state");
+            return (st, LeanHandoff::Turn(String::new()));
+        }
     };
-    let after = run(&wt);
-    let prior = crate::together::test_at(&repo, &before, &cmd);
     let mut st = shared.lock().expect("state");
-    let (Ok((after_ok, after_text)), Ok((before_ok, before_text))) = (after, prior) else {
+    let Ok((before_ok, before_text)) = prior else {
         return (st, LeanHandoff::Turn(String::new()));
     };
     let after_fail = crate::together::failing_tests(&after_text);
@@ -1141,7 +1141,7 @@ fn lean_handoff<'a>(
 /// The ticket's acceptance check at the finish gate.
 fn check_gate<'a>(
     shared: &'a Shared,
-    st: std::sync::MutexGuard<'a, State>,
+    mut st: std::sync::MutexGuard<'a, State>,
     agent: &str,
 ) -> (std::sync::MutexGuard<'a, State>, Option<String>) {
     let Some(a) = st.agents.get(agent) else {
@@ -1149,20 +1149,12 @@ fn check_gate<'a>(
     };
     let Some(cmd) = a.check.clone() else { return (st, None) };
     let wt = a.worktree.clone();
+    st.log("check_start", json!({ "agent": agent }));
     drop(st);
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .current_dir(&wt)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .output();
+    let out = crate::shell::run_shell_timeout(&cmd, &wt, crate::shell::check_timeout());
     let mut st = shared.lock().expect("state");
-    let (ok, text) = match out {
-        Ok(o) => {
-            let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
-            t.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.success(), t)
-        }
+    let (ok, timed_out, text) = match out {
+        Ok(o) => (o.ok, o.timed_out, o.output),
         Err(e) => {
             st.log(
                 "error",
@@ -1197,7 +1189,7 @@ fn check_gate<'a>(
         }
         st.log(
             "check",
-            json!({ "agent": agent, "passed": false, "failures": failures, "decision": "allow", "reason": if progressing { "check_limit" } else { "no_progress" } }),
+            json!({ "agent": agent, "passed": false, "timed_out": timed_out, "failures": failures, "decision": "allow", "reason": if progressing { "check_limit" } else { "no_progress" } }),
         );
         return (st, None);
     }
@@ -1207,9 +1199,16 @@ fn check_gate<'a>(
     }
     st.log(
         "check",
-        json!({ "agent": agent, "passed": false, "failures": failures, "decision": "block" }),
+        json!({ "agent": agent, "passed": false, "timed_out": timed_out, "failures": failures, "decision": "block" }),
     );
-    let mut reason = format!("[concord] Your ticket's acceptance check (`{cmd}`) still fails ({failures} failing):\n");
+    let mut reason = if timed_out {
+        format!(
+            "[concord] Your ticket's acceptance check (`{cmd}`) TIMED OUT after {}s — your implementation likely has an infinite loop or runaway recursion:\n",
+            crate::shell::check_timeout().as_secs()
+        )
+    } else {
+        format!("[concord] Your ticket's acceptance check (`{cmd}`) still fails ({failures} failing):\n")
+    };
     for t in failing.iter().take(25) {
         reason.push_str(&format!("  {t}\n"));
     }
@@ -1321,20 +1320,15 @@ fn peer_check_gate<'a>(
     }
 
     let mut culprit: Option<(String, String, String, Vec<String>, String)> = None;
+    let timeout = crate::shell::check_timeout();
     for sp in &specs {
-        let Ok(out) = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&sp.cmd)
-            .current_dir(&tmp_dir)
-            .output()
-        else {
+        let Ok(out) = crate::shell::run_shell_timeout(&sp.cmd, &tmp_dir, timeout) else {
             continue;
         };
-        if out.status.success() {
+        if out.ok {
             continue;
         }
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let text = out.output;
         let fails_merged = crate::together::failing_tests(&text);
         let mut regressed: BTreeSet<String> = if !fails_merged.is_empty() {
             fails_merged.difference(&sp.baseline_fails).cloned().collect()
@@ -1354,16 +1348,10 @@ fn peer_check_gate<'a>(
             .git(&["worktree", "add", "--detach", "--quiet", &p_tmp_s, &peers_only])
             .is_ok()
         {
-            if let Ok(p_out) = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&sp.cmd)
-                .current_dir(&p_tmp)
-                .output()
-                && !p_out.status.success()
+            if let Ok(p_out) = crate::shell::run_shell_timeout(&sp.cmd, &p_tmp, timeout)
+                && !p_out.ok
             {
-                let mut pt = String::from_utf8_lossy(&p_out.stdout).into_owned();
-                pt.push_str(&String::from_utf8_lossy(&p_out.stderr));
-                for pre in crate::together::failing_tests(&pt) {
+                for pre in crate::together::failing_tests(&p_out.output) {
                     regressed.remove(&pre);
                 }
             }

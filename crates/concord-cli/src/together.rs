@@ -11,7 +11,6 @@
 use concord_git::Repo;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Lines of test output quoted in a notice.
@@ -122,12 +121,8 @@ pub fn resolve_test_cmd(test_cmd: &str, affected: Option<&BTreeSet<String>>) -> 
 }
 
 fn run_in(cmd: &str, dir: &Path) -> (bool, String) {
-    match Command::new("sh").arg("-c").arg(cmd).current_dir(dir).output() {
-        Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.success(), text)
-        }
+    match crate::shell::run_shell_timeout(cmd, dir, crate::shell::check_timeout()) {
+        Ok(o) => (o.ok, o.output),
         Err(e) => (false, e.to_string()),
     }
 }

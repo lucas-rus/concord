@@ -42,6 +42,7 @@ const GONE_SECS: f64 = 30.0;
 pub enum AgentState {
     #[default]
     Working,
+    Checking,
     Waiting {
         on: Vec<String>,
         why: String,
@@ -203,6 +204,20 @@ impl WatchState {
                     );
                 }
             }
+            "check_start" => {
+                let who = s(&d, "agent");
+                self.agent(&who, t).state = AgentState::Checking;
+            }
+            "check" => {
+                let who = s(&d, "agent");
+                let a = self.agent(&who, t);
+                if a.state == AgentState::Checking {
+                    a.state = AgentState::Working;
+                }
+                if d.get("timed_out").and_then(Value::as_bool).unwrap_or(false) {
+                    self.warn(t, format!("check     {who}: acceptance check timed out"));
+                }
+            }
             "finished" => {
                 let who = s(&d, "agent");
                 self.agent(&who, t).state = AgentState::Finished;
@@ -313,6 +328,7 @@ pub enum Alarm {
 pub fn agent_status(st: &WatchState, name: &str, a: &AgentView, now: f64) -> (String, &'static str, Option<Alarm>) {
     let (state, code) = match &a.state {
         AgentState::Working => ("working".to_owned(), "36"),
+        AgentState::Checking => ("checking".to_owned(), "36"),
         AgentState::Waiting { on, why } => (format!("waiting for {} ({why})", on.join(", ")), "33"),
         AgentState::Blocked(r) => (format!("held: {}", r.replace('_', " ")), "31"),
         AgentState::Finished => ("finished".to_owned(), "32"),
@@ -566,7 +582,10 @@ pub fn render_view(st: &WatchState, title: &str, view: &View) -> String {
     let count = |f: &dyn Fn(&AgentState) -> bool| st.agents.values().filter(|a| f(&a.state)).count();
     let mut tally = vec![format!("{finished}/{} finished", st.agents.len())];
     for (n, label) in [
-        (count(&|s| *s == AgentState::Working), "working"),
+        (
+            count(&|s| matches!(s, AgentState::Working | AgentState::Checking)),
+            "working",
+        ),
         (count(&|s| matches!(s, AgentState::Waiting { .. })), "waiting"),
         (count(&|s| matches!(s, AgentState::Blocked(_))), "held"),
         (
@@ -612,8 +631,10 @@ pub fn render_view(st: &WatchState, title: &str, view: &View) -> String {
             AgentState::Blocked(_) => "‖",
             AgentState::Failed(_) | AgentState::Exited => "✗",
             AgentState::Working if code == "31;1" => "✗",
-            AgentState::Working if color && !st.done => SPINNER[(view.tick + name.len()) % SPINNER.len()],
-            AgentState::Working => "●",
+            AgentState::Working | AgentState::Checking if color && !st.done => {
+                SPINNER[(view.tick + name.len()) % SPINNER.len()]
+            }
+            AgentState::Working | AgentState::Checking => "●",
         };
         let edits = a.edits.max(st.activity.get(name).map_or(0, |x| x.edits));
         let counters: Vec<String> = [
@@ -1099,6 +1120,25 @@ mod tests {
             s5.contains("process gone: crashed?") && s5.contains("1 warning(s)"),
             "{s5}"
         );
+    }
+
+    #[test]
+    fn check_start_prevents_false_crashed_alarm_and_timeout_warns() {
+        let mut st = fold(&[
+            r#"{"t":10.0,"event":"footprint","data":{"agent":"lists"}}"#,
+            r#"{"t":20.0,"event":"check_start","data":{"agent":"lists"}}"#,
+            r#"{"t":400.0,"event":"footprint","data":{"agent":"other"}}"#,
+        ]);
+        st.idle = Some(5);
+        st.probes.insert("lists".into(), probe(false, None, 0));
+        let screen = render(&st, "run", false);
+        assert!(screen.contains("checking"), "{screen}");
+        assert!(!screen.contains("process gone: crashed?"), "{screen}");
+        assert!(!screen.contains("warning"), "{screen}");
+
+        st.apply(r#"{"t":420.0,"event":"check","data":{"agent":"lists","passed":false,"timed_out":true,"decision":"block"}}"#);
+        let screen2 = render(&st, "run", false);
+        assert!(screen2.contains("acceptance check timed out"), "{screen2}");
     }
 
     #[test]

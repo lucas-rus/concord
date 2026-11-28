@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::Command;
 
 /// Result of inspecting all active `git worktree` checkouts in a repository.
 #[derive(Clone, Debug, Serialize)]
@@ -311,13 +310,11 @@ pub fn verify_merged_contracts(repo: &Repo, base_commit: &str, merged_commit: &s
 }
 
 fn run_shell(cmd: &str, dir: &Path) -> (bool, String) {
-    match Command::new("sh").arg("-c").arg(cmd).current_dir(dir).output() {
+    match crate::shell::run_shell_timeout(cmd, dir, crate::shell::check_timeout()) {
         Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&o.stderr));
-            let lines: Vec<&str> = text.lines().collect();
+            let lines: Vec<&str> = o.output.lines().collect();
             let tail = lines[lines.len().saturating_sub(25)..].join("\n");
-            (o.status.success(), tail)
+            (o.ok, tail)
         }
         Err(e) => (false, e.to_string()),
     }

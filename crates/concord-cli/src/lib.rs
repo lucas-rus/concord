@@ -10,6 +10,7 @@ pub mod regions;
 pub mod report;
 pub mod run;
 pub mod setup;
+pub mod shell;
 pub mod together;
 pub mod typecheck;
 pub mod watch;

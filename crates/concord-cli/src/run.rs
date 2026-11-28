@@ -563,14 +563,21 @@ impl OpencodeJob {
             cmd.args(["--session", s]);
         }
         cmd.arg(message).stdin(Stdio::null()).stdout(out_f).stderr(err_f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         let Ok(mut child) = cmd.spawn() else {
             return ((None, String::new(), 0.0, false), false);
         };
+        let pid = child.id();
         let _ = std::fs::write(
             PathBuf::from(format!("{}.pid", self.log_prefix.display())),
-            child.id().to_string(),
+            pid.to_string(),
         );
-        // Watchdog: kill a turn that produces no output for OPENCODE_IDLE.
+        // Watchdog: kill a turn (and any hung subprocesses it spawned) that
+        // produces no output for OPENCODE_IDLE.
         let mut last_len = 0u64;
         let mut last_change = Instant::now();
         let ok = loop {
@@ -584,6 +591,7 @@ impl OpencodeJob {
                 last_len = len;
                 last_change = Instant::now();
             } else if last_change.elapsed() > OPENCODE_IDLE {
+                crate::shell::kill_process_group(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 break false;
@@ -703,13 +711,11 @@ fn wait_all(running: Vec<Running>, results: &mut BTreeMap<String, AgentResult>, 
 }
 
 fn run_tests(cmd: &str, dir: &Path) -> (bool, String) {
-    match Command::new("sh").arg("-c").arg(cmd).current_dir(dir).output() {
+    match crate::shell::run_shell_timeout(cmd, dir, crate::shell::check_timeout()) {
         Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&o.stderr));
-            let lines: Vec<&str> = text.lines().collect();
+            let lines: Vec<&str> = o.output.lines().collect();
             let tail = lines[lines.len().saturating_sub(25)..].join("\n");
-            (o.status.success(), tail)
+            (o.ok, tail)
         }
         Err(e) => (false, e.to_string()),
     }
@@ -727,16 +733,16 @@ struct FailingTaskCheck {
 fn evaluate_task_checks(tasks: &[Task], dir: &Path) -> (usize, Vec<FailingTaskCheck>) {
     let mut all_unique: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut failing_tasks = Vec::new();
+    let timeout = crate::shell::check_timeout();
     for t in tasks {
         let Some(cmd) = &t.check else { continue };
-        let Ok(o) = Command::new("sh").arg("-c").arg(cmd).current_dir(dir).output() else {
+        let Ok(o) = crate::shell::run_shell_timeout(cmd, dir, timeout) else {
             continue;
         };
-        if o.status.success() {
+        if o.ok {
             continue;
         }
-        let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&o.stderr));
+        let text = o.output;
         let ids: Vec<String> = crate::together::failing_tests(&text).into_iter().collect();
         if ids.is_empty() {
             all_unique.insert(format!("__task_failed__:{}", t.name));
