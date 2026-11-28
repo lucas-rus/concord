@@ -1159,7 +1159,10 @@ class Discord:
         if not self.enabled:
             return "discord: off (set DISCORD_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN)"
         s = lambda n, d, req=False: {"type": 3, "name": n, "description": d, "required": req}
-        cmd = [{"name": "team", "description": "Concord team: who is working on what, and clashes", "options": [
+        # integration_types 0/1: installable to a server or to a user's own account;
+        # contexts 0/1/2: usable in servers, in a DM with the bot, and in other DMs.
+        cmd = [{"name": "team", "description": "Concord team: who is working on what, and clashes",
+                "integration_types": [0, 1], "contexts": [0, 1, 2], "options": [
             {"type": 1, "name": "status", "description": "Who is working on what, and open clashes"},
             {"type": 1, "name": "clashes", "description": "Open clashes and who fixes them"},
             {"type": 1, "name": "say", "description": "Message a teammate (their AI sees it too)",
