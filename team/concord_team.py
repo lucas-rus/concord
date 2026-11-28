@@ -1399,6 +1399,25 @@ class RelayHandler(http.server.BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
 
+def _relay_delete(self):
+    """DELETE /api/project?project=: forget a team's data on the relay (needs the relay key)."""
+    r = self._api()
+    if not r:
+        return
+    path, _, project = r
+    if path != "/api/project":
+        return self._send(404, {"error": "not found"})
+    with self.relay.lock:
+        shutil.rmtree(os.path.join(self.relay.data, "projects", project), ignore_errors=True)
+        c = self.relay.discord.cfg()
+        c["channels"].pop(project, None)
+        self.relay.discord.save_cfg(c)
+    return self._send(200, {"ok": True, "deleted": project})
+
+
+RelayHandler.do_DELETE = _relay_delete
+
+
 def cmd_serve(a):
     key = os.environ.get("RELAY_KEY", "")
     if len(key) < 16:
